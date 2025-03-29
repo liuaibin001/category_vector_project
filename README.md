@@ -59,7 +59,7 @@ CategoryVector 使用以下数据结构表示分类：
 
 ### 环境需求
 
-- Python 3.8+
+- Python 3.11+
 - PyTorch 2.0+
 - FAISS
 - Sentence Transformers
@@ -95,8 +95,17 @@ python src/categoryvector/cli.py build \
     --model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 \
     --vector-dim 384
 
+# 使用详细日志模式（查看完整构建过程）
+python src/categoryvector/cli.py build \
+    --categories data/categories.json \
+    --output data/vectors \
+    --verbose
+
 # 使用Poetry运行（确保在项目虚拟环境中执行）
 poetry run build --categories data/categories.json --output data/vectors --model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 --vector-dim 384
+
+# 使用Poetry运行（详细日志模式）
+poetry run build --categories data/categories.json --output data/vectors --verbose
 ```
 
 参数说明：
@@ -104,6 +113,8 @@ poetry run build --categories data/categories.json --output data/vectors --model
 - `--output, -o`：索引输出目录
 - `--model, -m`：使用的模型名称（默认为paraphrase-multilingual-MiniLM-L12-v2）
 - `--vector-dim, -d`：向量维度（默认为384）
+- `--verbose, -v`：启用详细日志输出，显示完整构建过程
+- `--log-level`：日志级别（DEBUG, INFO, WARNING, ERROR），默认INFO
 
 ### 搜索分类
 

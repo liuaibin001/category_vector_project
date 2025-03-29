@@ -5,6 +5,7 @@ import json
 import pickle
 import numpy as np
 import faiss
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
 
@@ -198,19 +199,56 @@ class VectorStorage:
         Args:
             directory: 保存目录
         """
+        start_time = time.time()
+        logger.info(f"开始保存索引到目录: {directory}")
+        
         # 创建目录
         directory.mkdir(parents=True, exist_ok=True)
         
         # 保存FAISS索引
-        faiss.write_index(self.index, str(directory / "index.faiss"))
+        index_path = directory / "index.faiss"
+        logger.info(f"保存FAISS索引到: {index_path}")
+        faiss_start_time = time.time()
+        faiss.write_index(self.index, str(index_path))
+        faiss_time = time.time() - faiss_start_time
+        index_size = index_path.stat().st_size / (1024 * 1024)  # MB
+        logger.info(f"FAISS索引保存完成，耗时: {faiss_time:.2f}秒，文件大小: {index_size:.2f} MB，向量数: {self.index.ntotal}")
         
         # 保存分类数据为数组格式
-        categories_data = [
-            cat.to_dict() 
-            for cat in self.categories.values()
-        ]
-        with open(directory / "categories.json", "w", encoding="utf-8") as f:
+        categories_path = directory / "categories.json"
+        logger.info(f"保存类别数据到: {categories_path}")
+        json_start_time = time.time()
+        
+        # 序列化前计算类别数
+        categories_count = len(self.categories)
+        logger.info(f"序列化 {categories_count} 个类别...")
+        
+        # 将分类转换为字典
+        categories_data = []
+        for i, cat in enumerate(self.categories.values()):
+            if i % 100 == 0 and i > 0:
+                logger.debug(f"已序列化 {i}/{categories_count} 个类别")
+            try:
+                cat_dict = cat.to_dict()
+                categories_data.append(cat_dict)
+            except Exception as e:
+                logger.error(f"序列化类别 ID={cat.id} 时出错: {e}")
+        
+        # 写入JSON文件
+        json_write_start = time.time()
+        with open(categories_path, "w", encoding="utf-8") as f:
             json.dump(categories_data, f, ensure_ascii=False, indent=2)
+        json_write_time = time.time() - json_write_start
+        json_total_time = time.time() - json_start_time
+        
+        categories_size = categories_path.stat().st_size / (1024 * 1024)  # MB
+        logger.info(f"类别数据保存完成，序列化耗时: {json_total_time:.2f}秒，写入耗时: {json_write_time:.2f}秒")
+        logger.info(f"类别数据文件大小: {categories_size:.2f} MB")
+        
+        # 记录总耗时
+        total_time = time.time() - start_time
+        total_size = index_size + categories_size
+        logger.info(f"保存完成，总耗时: {total_time:.2f}秒，总文件大小: {total_size:.2f} MB")
     
     def load(self, directory: Path):
         """加载索引和分类数据
@@ -218,49 +256,102 @@ class VectorStorage:
         Args:
             directory: 数据目录
         """
+        start_time = time.time()
+        logger.info(f"开始从目录加载索引: {directory}")
+        
         directory = Path(directory)
         
         # 尝试加载新格式索引
         index_file = directory / "index.faiss"
         if index_file.exists():
+            logger.info(f"找到FAISS索引文件: {index_file}")
+            index_size = index_file.stat().st_size / (1024 * 1024)  # MB
+            logger.info(f"开始读取FAISS索引，文件大小: {index_size:.2f} MB")
+            
+            index_start_time = time.time()
             self.index = faiss.read_index(str(index_file))
+            index_time = time.time() - index_start_time
+            
+            logger.info(f"FAISS索引加载完成，耗时: {index_time:.2f}秒，索引包含 {self.index.ntotal} 个向量")
             
             # 加载分类数据
             categories_file = directory / "categories.json"
             if categories_file.exists():
+                logger.info(f"找到类别数据文件: {categories_file}")
+                categories_size = categories_file.stat().st_size / (1024 * 1024)  # MB
+                logger.info(f"开始读取类别数据，文件大小: {categories_size:.2f} MB")
+                
+                json_start_time = time.time()
                 with open(categories_file, "r", encoding="utf-8") as f:
                     categories_data = json.load(f)
-                    
+                json_time = time.time() - json_start_time
+                logger.info(f"类别数据JSON解析完成，耗时: {json_time:.2f}秒，包含 {len(categories_data)} 条数据")
+                
+                # 开始转换类别数据
+                process_start_time = time.time()
+                categories_count = 0
+                
                 if isinstance(categories_data, list):
                     # 数组格式 [{}, {}, ...]
-                    self.categories = {
-                        cat_data["id"]: Category.from_dict(cat_data)
-                        for cat_data in categories_data
-                    }
+                    logger.info(f"检测到数组格式的类别数据，开始处理 {len(categories_data)} 个类别")
+                    for i, cat_data in enumerate(categories_data):
+                        try:
+                            if i % 100 == 0 and i > 0:
+                                logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
+                            category = Category.from_dict(cat_data)
+                            self.categories[category.id] = category
+                            categories_count += 1
+                        except Exception as e:
+                            logger.error(f"加载类别 ID={cat_data.get('id', '未知')} 时出错: {e}")
                 else:
                     # 字典格式 {"1": {}, "2": {}, ...}
-                    self.categories = {
-                        int(cat_id): Category.from_dict(cat_data)
-                        for cat_id, cat_data in categories_data.items()
-                    }
+                    logger.info(f"检测到字典格式的类别数据，开始处理 {len(categories_data)} 个类别")
+                    for i, (cat_id, cat_data) in enumerate(categories_data.items()):
+                        try:
+                            if i % 100 == 0 and i > 0:
+                                logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
+                            category = Category.from_dict(cat_data)
+                            self.categories[int(cat_id)] = category
+                            categories_count += 1
+                        except Exception as e:
+                            logger.error(f"加载类别 ID={cat_id} 时出错: {e}")
+                
+                process_time = time.time() - process_start_time
+                logger.info(f"类别数据处理完成，耗时: {process_time:.2f}秒，成功加载 {categories_count} 个类别")
+            else:
+                logger.warning(f"未找到类别数据文件: {categories_file}")
+        
         # 尝试加载旧格式索引
         else:
             vectors_file = directory / "vectors.npy"
             info_file = directory / "info.json"
             
             if vectors_file.exists() and info_file.exists():
+                logger.info(f"未找到FAISS索引文件，尝试加载旧格式数据")
+                logger.info(f"找到向量文件: {vectors_file} 和信息文件: {info_file}")
+                
                 # 加载向量
+                vectors_start_time = time.time()
                 vectors = np.load(vectors_file)
+                vectors_time = time.time() - vectors_start_time
+                logger.info(f"向量数据加载完成，耗时: {vectors_time:.2f}秒，形状: {vectors.shape}")
                 
                 # 加载名称和元数据
+                info_start_time = time.time()
                 with open(info_file, 'r', encoding='utf-8') as f:
                     info = json.load(f)
+                info_time = time.time() - info_start_time
+                logger.info(f"信息数据加载完成，耗时: {info_time:.2f}秒，包含 {len(info['names'])} 个名称")
                 
                 # 构建索引
+                index_build_start = time.time()
                 self.index = faiss.IndexFlatL2(vectors.shape[1])
                 self.index.add(vectors.astype('float32'))
+                index_build_time = time.time() - index_build_start
+                logger.info(f"FAISS索引构建完成，耗时: {index_build_time:.2f}秒，向量数: {self.index.ntotal}")
                 
                 # 创建临时分类
+                logger.info(f"开始从旧格式创建临时分类对象")
                 for i, name in enumerate(info["names"]):
                     category = Category(
                         id=i+1,
@@ -270,3 +361,12 @@ class VectorStorage:
                         description=f"Auto-generated category for {name}"
                     )
                     self.categories[category.id] = category
+                logger.info(f"临时分类对象创建完成，共 {len(self.categories)} 个")
+            else:
+                error_msg = f"无法加载索引: 目录 {directory} 中没有有效的索引文件"
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+        
+        # 记录总耗时
+        total_time = time.time() - start_time
+        logger.info(f"索引加载完成，总耗时: {total_time:.2f}秒，加载了 {len(self.categories)} 个类别和 {self.index.ntotal} 个向量")

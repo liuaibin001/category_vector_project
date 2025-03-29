@@ -51,6 +51,12 @@ def parse_build_args(args=None):
         default="INFO",
         help="日志级别"
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="启用详细日志输出（自动设置日志级别为DEBUG）"
+    )
     
     return parser.parse_args(args)
 
@@ -105,51 +111,107 @@ def build_index(args=None):
     if args is None:
         args = parse_build_args()
     
+    # 处理详细日志模式
+    if args.verbose:
+        args.log_level = "DEBUG"
+        
     # 设置日志
     logger = setup_logger("categoryvector", level=args.log_level)
     
+    logger.info(f"开始构建索引过程...")
+    logger.info(f"参数信息: 类别数据={args.categories}, 输出目录={args.output}, 向量维度={args.vector_dim}, 模型={args.model}, 日志级别={args.log_level}")
+    
     try:
         # 创建配置
+        logger.info(f"正在创建配置...")
         config = CategoryVectorConfig(
             model_name=args.model,
             data_dir=Path(args.categories).parent,
             log_level=args.log_level,
             vector_dim=args.vector_dim
         )
+        logger.debug(f"配置已创建: 模型={config.model_name}, 向量维度={config.vector_dim}")
         
         # 加载类别数据
         categories_file = Path(args.categories)
-        logger.info(f"加载类别数据: {categories_file}")
+        logger.info(f"正在加载类别数据: {categories_file}")
         processor = CategoryProcessor(config)
         processor.load_from_json(categories_file)
-        logger.info(f"加载了 {len(processor.categories)} 个类别")
+        
+        categories_count = len(processor.categories)
+        logger.info(f"成功加载 {categories_count} 个类别")
+        if categories_count > 0 and args.log_level == "DEBUG":
+            # 在DEBUG级别输出一些分类样例
+            sample_size = min(3, categories_count)
+            sample_categories = list(processor.categories.values())[:sample_size]
+            for i, cat in enumerate(sample_categories):
+                logger.debug(f"分类样例 {i+1}/{sample_size}: ID={cat.id}, 路径={cat.path}, 层级={cat.level_depth}")
         
         # 生成向量
-        logger.info(f"使用模型 {config.model_name} 生成向量")
+        logger.info(f"开始加载模型: {config.model_name}")
         generator = VectorGenerator(model_name=config.model_name, config=config)
+        logger.info(f"模型加载完成，向量维度: {generator.model.get_sentence_embedding_dimension()}")
         
         # 为每个分类生成向量
-        for category in processor.categories.values():
-            category = generator.enrich_category_vectors(category)
+        logger.info(f"开始为 {categories_count} 个分类生成向量...")
+        total_categories = categories_count
+        processed_count = 0
+        
+        for cat_id, category in processor.categories.items():
+            processed_count += 1
+            if processed_count % 10 == 0 or processed_count == total_categories:
+                logger.info(f"处理进度: {processed_count}/{total_categories} ({processed_count/total_categories*100:.1f}%)")
+            elif processed_count % 5 == 0:
+                logger.debug(f"处理进度: {processed_count}/{total_categories} ({processed_count/total_categories*100:.1f}%)")
+                
+            logger.debug(f"正在生成分类向量: ID={category.id}, 路径={category.path}")
+            try:
+                category = generator.enrich_category_vectors(category)
+                logger.debug(f"分类 ID={category.id} 向量生成成功，向量形状={category.vector.shape}，层级向量数量={len(category.level_vectors)}")
+            except Exception as e:
+                logger.error(f"为分类 ID={category.id} 生成向量时出错: {e}")
+                
+        logger.info(f"所有分类向量生成完成")
         
         # 构建向量索引
-        logger.info("构建向量索引")
+        logger.info("开始构建FAISS向量索引...")
         storage = VectorStorage(
             dimension=generator.model.get_sentence_embedding_dimension(),
             config=config
         )
-        for category in processor.categories.values():
-            storage.add_category(category)
+        
+        # 添加分类到索引
+        added_count = 0
+        for cat_id, category in processor.categories.items():
+            try:
+                storage.add_category(category)
+                added_count += 1
+                if added_count % 50 == 0:
+                    logger.debug(f"已添加 {added_count}/{total_categories} 个分类到索引")
+            except Exception as e:
+                logger.error(f"添加分类 ID={category.id} 到索引时出错: {e}")
+                
+        logger.info(f"索引构建完成，共添加了 {added_count} 个分类")
         
         # 创建输出目录
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 保存索引和分类数据
-        logger.info(f"保存索引到 {output_dir}")
+        logger.info(f"开始保存索引到 {output_dir}")
         storage.save(output_dir)
         
-        logger.info("索引构建完成")
+        # 输出索引统计信息
+        index_file_size = (output_dir / "index.faiss").stat().st_size / (1024 * 1024)
+        categories_file_size = (output_dir / "categories.json").stat().st_size / (1024 * 1024)
+        
+        logger.info(f"索引保存完成:")
+        logger.info(f"- FAISS索引文件大小: {index_file_size:.2f} MB")
+        logger.info(f"- 类别数据文件大小: {categories_file_size:.2f} MB")
+        logger.info(f"- 总类别数量: {len(storage.categories)}")
+        logger.info(f"- 索引向量数量: {storage.index.ntotal}")
+        
+        logger.info("索引构建过程成功完成")
     
     except Exception as e:
         logger.exception(f"构建索引时发生错误: {e}")
@@ -298,6 +360,12 @@ def main():
             "-m",
             default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             help="向量模型名称"
+        )
+        build_parser.add_argument(
+            "--verbose",
+            "-v",
+            action="store_true",
+            help="启用详细日志输出（自动设置日志级别为DEBUG）"
         )
         
         # 搜索子命令

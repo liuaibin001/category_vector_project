@@ -45,5 +45,4 @@ multi_line_output = 3
 [tool.poetry.scripts]
 build = "categoryvector.cli:main"
 search = "categoryvector.cli:main"
-v = "categoryvector.cli:main"
-categoryvector = "categoryvector.cli:main"
+cv = "categoryvector.cli:main"
