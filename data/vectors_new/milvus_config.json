@@ -1,0 +1,6 @@
+{
+  "collection_name": "category_vectors",
+  "dimension": 384,
+  "host": "192.168.3.9",
+  "port": "19530"
+}

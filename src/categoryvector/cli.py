@@ -57,6 +57,28 @@ def parse_build_args(args=None):
         action="store_true",
         help="启用详细日志输出（自动设置日志级别为DEBUG）"
     )
+    # 添加Milvus相关参数
+    parser.add_argument(
+        "--milvus-host",
+        default="localhost",
+        help="Milvus服务器地址"
+    )
+    parser.add_argument(
+        "--milvus-port",
+        default="19530",
+        help="Milvus服务器端口"
+    )
+    parser.add_argument(
+        "--collection-name",
+        default="category_vectors",
+        help="Milvus集合名称"
+    )
+    parser.add_argument(
+        "--index-type",
+        choices=["flat", "ivf", "hnsw"],
+        default="flat",
+        help="索引类型: flat, ivf, hnsw"
+    )
     
     return parser.parse_args(args)
 
@@ -128,9 +150,14 @@ def build_index(args=None):
             model_name=args.model,
             data_dir=Path(args.categories).parent,
             log_level=args.log_level,
-            vector_dim=args.vector_dim
+            vector_dim=args.vector_dim,
+            # 添加Milvus配置参数
+            milvus_host=args.milvus_host,
+            milvus_port=args.milvus_port,
+            collection_name=args.collection_name,
+            index_type=args.index_type
         )
-        logger.debug(f"配置已创建: 模型={config.model_name}, 向量维度={config.vector_dim}")
+        logger.debug(f"配置已创建: 模型={config.model_name}, 向量维度={config.vector_dim}, Milvus主机={config.milvus_host}, Milvus端口={config.milvus_port}")
         
         # 加载类别数据
         categories_file = Path(args.categories)
@@ -174,7 +201,7 @@ def build_index(args=None):
         logger.info(f"所有分类向量生成完成")
         
         # 构建向量索引
-        logger.info("开始构建FAISS向量索引...")
+        logger.info("开始构建Milvus向量索引...")
         storage = VectorStorage(
             dimension=generator.model.get_sentence_embedding_dimension(),
             config=config
@@ -202,14 +229,12 @@ def build_index(args=None):
         storage.save(output_dir)
         
         # 输出索引统计信息
-        index_file_size = (output_dir / "index.faiss").stat().st_size / (1024 * 1024)
-        categories_file_size = (output_dir / "categories.json").stat().st_size / (1024 * 1024)
-        
         logger.info(f"索引保存完成:")
-        logger.info(f"- FAISS索引文件大小: {index_file_size:.2f} MB")
-        logger.info(f"- 类别数据文件大小: {categories_file_size:.2f} MB")
+        logger.info(f"- Milvus集合名称: {config.collection_name}")
+        logger.info(f"- Milvus主机地址: {config.milvus_host}:{config.milvus_port}")
+        logger.info(f"- 索引类型: {config.index_type}")
         logger.info(f"- 总类别数量: {len(storage.categories)}")
-        logger.info(f"- 索引向量数量: {storage.index.ntotal}")
+        logger.info(f"- 向量维度: {config.vector_dim}")
         
         logger.info("索引构建过程成功完成")
     
@@ -223,8 +248,14 @@ def search(args=None):
     if args is None:
         args = parse_search_args()
     
+    # 处理详细日志模式
+    if hasattr(args, 'verbose') and args.verbose:
+        args.log_level = "DEBUG"
+        
     # 设置日志
     logger = setup_logger("categoryvector", level=args.log_level)
+    
+    logger.info(f"开始搜索过程...")
     
     try:
         # 检查索引目录
@@ -237,7 +268,11 @@ def search(args=None):
         config = CategoryVectorConfig(
             model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",  # 默认模型
             data_dir=index_path,
-            log_level=args.log_level
+            log_level=args.log_level,
+            # 添加Milvus配置
+            milvus_host=args.milvus_host,
+            milvus_port=args.milvus_port,
+            collection_name=args.collection_name
         )
         
         # 加载索引和类别数据
@@ -368,6 +403,29 @@ def main():
             help="启用详细日志输出（自动设置日志级别为DEBUG）"
         )
         
+        # 添加Milvus相关参数到build子命令
+        build_parser.add_argument(
+            "--milvus-host",
+            default="localhost",
+            help="Milvus服务器地址"
+        )
+        build_parser.add_argument(
+            "--milvus-port",
+            default="19530",
+            help="Milvus服务器端口"
+        )
+        build_parser.add_argument(
+            "--collection-name",
+            default="category_vectors",
+            help="Milvus集合名称"
+        )
+        build_parser.add_argument(
+            "--index-type",
+            choices=["flat", "ivf", "hnsw"],
+            default="flat",
+            help="索引类型: flat, ivf, hnsw"
+        )
+        
         # 搜索子命令
         search_parser = subparsers.add_parser("search", help="搜索类别")
         search_parser.add_argument(
@@ -401,6 +459,31 @@ def main():
             "-l",
             type=int,
             help="指定搜索层级"
+        )
+        
+        # 添加verbose参数
+        search_parser.add_argument(
+            "--verbose",
+            "-v",
+            action="store_true",
+            help="启用详细日志输出（自动设置日志级别为DEBUG）"
+        )
+        
+        # 添加Milvus相关参数到search子命令
+        search_parser.add_argument(
+            "--milvus-host",
+            default="localhost",
+            help="Milvus服务器地址"
+        )
+        search_parser.add_argument(
+            "--milvus-port",
+            default="19530",
+            help="Milvus服务器端口"
+        )
+        search_parser.add_argument(
+            "--collection-name",
+            default="category_vectors",
+            help="Milvus集合名称"
         )
         
         args = parser.parse_args()

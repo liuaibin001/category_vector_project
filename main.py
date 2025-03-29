@@ -36,6 +36,14 @@ def parse_args():
                              help="使用的向量模型名称")
     build_parser.add_argument("--enrich", "-e", action="store_true",
                              help="是否使用大模型丰富分类数据")
+    build_parser.add_argument("--milvus-host", "-mh", type=str,
+                             help="Milvus主机地址")
+    build_parser.add_argument("--milvus-port", "-mp", type=int,
+                             help="Milvus端口")
+    build_parser.add_argument("--collection-name", "-cn", type=str,
+                             help="Milvus集合名称")
+    build_parser.add_argument("--index-type", "-it", type=str,
+                             help="Milvus索引类型")
     
     # 搜索子命令
     search_parser = subparsers.add_parser("search", help="搜索类别")
@@ -66,7 +74,12 @@ def build_index(args):
     config = CategoryVectorConfig(
         model_name=args.model,
         data_dir=Path(args.categories).parent,
-        log_level=args.log_level
+        log_level=args.log_level,
+        # 添加Milvus配置
+        milvus_host=args.milvus_host,
+        milvus_port=args.milvus_port,
+        collection_name=args.collection_name,
+        index_type=args.index_type
     )
     
     # 加载类别数据

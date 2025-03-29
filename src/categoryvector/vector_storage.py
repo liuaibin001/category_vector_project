@@ -4,7 +4,14 @@ import os
 import json
 import pickle
 import numpy as np
-import faiss
+# 替换FAISS为Milvus
+# import faiss
+from pymilvus import (
+    connections,
+    utility,
+    FieldSchema, CollectionSchema, DataType,
+    Collection,
+)
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
@@ -27,8 +34,87 @@ class VectorStorage:
         """
         self.dimension = dimension
         self.config = config
-        self.index = faiss.IndexFlatL2(dimension)
         self.categories: Dict[int, Category] = {}
+        
+        # 连接到Milvus服务器
+        self.connect_to_milvus()
+        
+        # 设置集合名称
+        self.collection_name = "category_vectors"
+        if self.config and hasattr(self.config, "collection_name"):
+            self.collection_name = self.config.collection_name
+        
+        # 初始化集合
+        self.collection = None
+        
+    def connect_to_milvus(self):
+        """连接到Milvus服务器"""
+        host = "localhost"
+        port = "19530"
+        
+        if self.config:
+            if hasattr(self.config, "milvus_host"):
+                host = self.config.milvus_host
+            if hasattr(self.config, "milvus_port"):
+                port = self.config.milvus_port
+        
+        logger.info(f"连接到Milvus服务器: {host}:{port}")
+        try:
+            connections.connect("default", host=host, port=port)
+            logger.info(f"Milvus连接成功: {host}:{port}")
+        except Exception as e:
+            logger.error(f"连接Milvus服务器失败: {host}:{port}, 错误: {e}")
+            raise
+        
+    def setup_collection(self):
+        """创建或获取Milvus集合"""
+        # 检查集合是否存在
+        if utility.has_collection(self.collection_name):
+            logger.info(f"集合已存在: {self.collection_name}")
+            self.collection = Collection(self.collection_name)
+        else:
+            logger.info(f"创建新集合: {self.collection_name}")
+            # 定义字段
+            fields = [
+                FieldSchema(name="pk", dtype=DataType.INT64, is_primary=True, auto_id=True),
+                FieldSchema(name="category_id", dtype=DataType.INT64),
+                FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=self.dimension)
+            ]
+            
+            # 创建集合模式
+            schema = CollectionSchema(fields=fields, description="Category vectors collection")
+            
+            # 创建集合
+            self.collection = Collection(name=self.collection_name, schema=schema)
+            
+            # 创建索引
+            index_params = {
+                "metric_type": "L2",
+                "index_type": "FLAT"  # 默认使用FLAT索引
+            }
+            
+            # 根据配置选择不同索引类型
+            if self.config and self.config.index_type:
+                if self.config.index_type.lower() == "ivf":
+                    index_params["index_type"] = "IVF_FLAT"
+                    index_params["params"] = {"nlist": self.config.nlist}
+                elif self.config.index_type.lower() == "hnsw":
+                    index_params["index_type"] = "HNSW"
+                    index_params["params"] = {"M": self.config.m_factor, "efConstruction": 200}
+            
+            # 创建向量字段的索引
+            try:
+                self.collection.create_index(field_name="vector", index_params=index_params)
+                logger.info(f"成功创建索引: {index_params}")
+            except Exception as e:
+                logger.error(f"创建索引失败: {e}")
+        
+        # 加载集合到内存
+        try:
+            self.collection.load()
+            logger.info(f"集合 {self.collection_name} 加载到内存成功，实体数: {self.collection.num_entities}")
+        except Exception as e:
+            logger.error(f"加载集合失败: {e}")
         
     def add_category(self, category: Category):
         """添加分类到索引
@@ -38,12 +124,51 @@ class VectorStorage:
         """
         if category.vector is None:
             raise ValueError("Category must have a vector")
-            
-        # 添加到FAISS索引
-        self.index.add(np.array([category.vector]).astype('float32'))
         
-        # 保存分类对象
-        self.categories[category.id] = category
+        # 确保集合已初始化
+        if self.collection is None:
+            self.setup_collection()
+            
+        try:
+            # 首先检查是否已存在该分类ID的数据
+            category_id = int(category.id)
+            
+            # 查询现有数据
+            if self.collection.num_entities > 0:
+                try:
+                    # 构建查询条件
+                    expr = f"category_id == {category_id}"
+                    result = self.collection.query(
+                        expr=expr,
+                        output_fields=["pk", "category_id"]
+                    )
+                    
+                    # 如果找到匹配的记录，先删除
+                    if result and len(result) > 0:
+                        logger.debug(f"发现已存在的分类 ID={category_id}，将进行覆盖")
+                        # 获取主键ID用于删除
+                        pk_to_delete = [r["pk"] for r in result]
+                        # 删除现有记录
+                        self.collection.delete(f"pk in {pk_to_delete}")
+                        logger.debug(f"已删除分类 ID={category_id} 的现有记录")
+                except Exception as e:
+                    logger.warning(f"检查分类 ID={category_id} 是否存在时出错: {e}")
+            
+            # 插入到Milvus - 修正插入格式
+            self.collection.insert([
+                {"category_id": category_id, 
+                 "vector": category.vector.astype('float32').tolist()}
+            ])
+            
+            # 保存分类对象
+            self.categories[category.id] = category
+            
+            # 增加日志
+            logger.debug(f"成功添加分类 ID={category.id} 到Milvus集合")
+            
+        except Exception as e:
+            logger.error(f"添加分类 ID={category.id} 到Milvus失败: {e}")
+            raise
         
     def search(
         self,
@@ -63,61 +188,80 @@ class VectorStorage:
         Returns:
             (分类对象, 相似度)元组的列表，按相似度降序排序
         """
-        print(f"开始搜索，索引包含 {self.index.ntotal} 个向量，分类数量 {len(self.categories)}")
+        # 确保集合已初始化
+        if self.collection is None:
+            self.setup_collection()
+            
+        # 获取集合中实体数量
+        entity_count = self.collection.num_entities
+        print(f"开始搜索，集合包含 {entity_count} 个向量，分类数量 {len(self.categories)}")
         print(f"请求返回 {top_k} 个结果，相似度阈值 {threshold}")
         
         # 确保查询向量是正确的形状和类型
         if query_vector.ndim == 1:
-            query_vector = query_vector.reshape(1, -1)
+            query_vector = query_vector.reshape(-1)
         query_vector = query_vector.astype('float32')
         
-        # 搜索向量 - 获取更多结果用于过滤，确保有足够的候选项
-        fetch_k = min(top_k * 3, self.index.ntotal)  # 获取更多结果以应对阈值过滤
-        distances, indices = self.index.search(
-            query_vector,
-            fetch_k
-        )
+        # 如果集合为空，直接返回空结果
+        if entity_count == 0:
+            return []
         
-        print(f"FAISS搜索结果：获取了 {fetch_k} 个候选项")
+        # 设置搜索参数
+        search_params = {"metric_type": "L2"}
+        
+        # 根据配置调整搜索参数
+        if self.config and self.config.index_type:
+            if self.config.index_type.lower() == "ivf":
+                search_params["params"] = {"nprobe": min(self.config.nlist // 4, 10)}
+            elif self.config.index_type.lower() == "hnsw":
+                search_params["params"] = {"ef": 50}
+        
+        # 搜索向量 - 获取更多结果用于过滤
+        fetch_k = min(top_k * 3, entity_count)
+        
+        try:
+            results = self.collection.search(
+                data=[query_vector.tolist()],
+                anns_field="vector",
+                param=search_params,
+                limit=fetch_k,
+                output_fields=["category_id"]
+            )
+        except Exception as e:
+            logger.error(f"Milvus搜索失败: {e}")
+            return []
         
         # 处理结果
-        results = []
-        for i, (distance, idx) in enumerate(zip(distances[0], indices[0])):
-            if idx == -1:  # FAISS填充值
-                continue
-            
-            # 将索引转换为分类ID
-            if idx < len(self.categories):
-                # 直接使用索引获取对应的分类ID
-                category_id = list(self.categories.keys())[idx]
-                category = self.categories[category_id]
-                
-                # 排除指定ID
-                if exclude_ids and category.id in exclude_ids:
-                    continue
-                
-                # L2距离转换为相似度
-                # 使用指数衰减函数，让相似度更符合直觉
-                similarity = np.exp(-distance / 10.0)  # 除以10是为了调整衰减速率
-                
-                # 应用阈值
-                if similarity >= threshold:
-                    results.append((category, similarity))
-            else:
-                print(f"警告：索引 {idx} 超出分类数量范围 {len(self.categories)}")
+        category_results = []
+        for hits in results:
+            for hit in hits:
+                category_id = hit.entity.get('category_id')
+                if category_id in self.categories:
+                    # Milvus返回的是距离，需要转换为相似度
+                    distance = hit.distance
+                    # 使用指数衰减函数，与原FAISS中相同的转换方式
+                    similarity = np.exp(-distance / 10.0)
+                    
+                    # 排除特定ID
+                    if exclude_ids and category_id in exclude_ids:
+                        continue
+                    
+                    # 应用阈值
+                    if similarity >= threshold:
+                        category_results.append((self.categories[category_id], similarity))
         
-        # 按相似度排序（降序）
-        results.sort(key=lambda x: x[1], reverse=True)
+        # 按相似度降序排序
+        category_results.sort(key=lambda x: x[1], reverse=True)
         
-        # 只返回指定数量的结果
-        final_results = results[:top_k]
+        # 只返回前top_k个结果
+        final_results = category_results[:top_k]
         
-        print(f"过滤后找到 {len(results)} 个结果，返回前 {len(final_results)} 个")
+        print(f"过滤后找到 {len(category_results)} 个结果，返回前 {len(final_results)} 个")
         
         # 打印返回的结果
         for i, (category, similarity) in enumerate(final_results):
             print(f"结果 {i+1}: 分类 {category.id} ('{category.path}'), 相似度 {similarity:.4f}")
-        
+            
         return final_results
     
     def search_by_level(
@@ -200,21 +344,33 @@ class VectorStorage:
             directory: 保存目录
         """
         start_time = time.time()
-        logger.info(f"开始保存索引到目录: {directory}")
+        logger.info(f"开始保存到目录: {directory}")
         
         # 创建目录
         directory.mkdir(parents=True, exist_ok=True)
         
-        # 保存FAISS索引
-        index_path = directory / "index.faiss"
-        logger.info(f"保存FAISS索引到: {index_path}")
-        faiss_start_time = time.time()
-        faiss.write_index(self.index, str(index_path))
-        faiss_time = time.time() - faiss_start_time
-        index_size = index_path.stat().st_size / (1024 * 1024)  # MB
-        logger.info(f"FAISS索引保存完成，耗时: {faiss_time:.2f}秒，文件大小: {index_size:.2f} MB，向量数: {self.index.ntotal}")
+        # 保存Milvus配置信息
+        config_path = directory / "milvus_config.json"
+        logger.info(f"保存Milvus配置到: {config_path}")
         
-        # 保存分类数据为数组格式
+        milvus_config = {
+            "collection_name": self.collection_name,
+            "dimension": self.dimension,
+            "host": "localhost",
+            "port": "19530"
+        }
+        
+        # 如果有配置，则使用配置中的信息
+        if self.config:
+            if hasattr(self.config, "milvus_host"):
+                milvus_config["host"] = self.config.milvus_host
+            if hasattr(self.config, "milvus_port"):
+                milvus_config["port"] = self.config.milvus_port
+        
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(milvus_config, f, ensure_ascii=False, indent=2)
+        
+        # 保存分类数据为JSON格式
         categories_path = directory / "categories.json"
         logger.info(f"保存类别数据到: {categories_path}")
         json_start_time = time.time()
@@ -247,8 +403,7 @@ class VectorStorage:
         
         # 记录总耗时
         total_time = time.time() - start_time
-        total_size = index_size + categories_size
-        logger.info(f"保存完成，总耗时: {total_time:.2f}秒，总文件大小: {total_size:.2f} MB")
+        logger.info(f"保存完成，总耗时: {total_time:.2f}秒")
     
     def load(self, directory: Path):
         """加载索引和分类数据
@@ -257,116 +412,83 @@ class VectorStorage:
             directory: 数据目录
         """
         start_time = time.time()
-        logger.info(f"开始从目录加载索引: {directory}")
+        logger.info(f"开始从目录加载: {directory}")
         
         directory = Path(directory)
         
-        # 尝试加载新格式索引
-        index_file = directory / "index.faiss"
-        if index_file.exists():
-            logger.info(f"找到FAISS索引文件: {index_file}")
-            index_size = index_file.stat().st_size / (1024 * 1024)  # MB
-            logger.info(f"开始读取FAISS索引，文件大小: {index_size:.2f} MB")
+        # 加载Milvus配置
+        config_file = directory / "milvus_config.json"
+        if config_file.exists():
+            logger.info(f"找到Milvus配置文件: {config_file}")
+            with open(config_file, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
             
-            index_start_time = time.time()
-            self.index = faiss.read_index(str(index_file))
-            index_time = time.time() - index_start_time
+            # 更新Milvus连接信息
+            self.collection_name = config_data.get("collection_name", "category_vectors")
+            self.dimension = config_data.get("dimension", self.dimension)
             
-            logger.info(f"FAISS索引加载完成，耗时: {index_time:.2f}秒，索引包含 {self.index.ntotal} 个向量")
-            
-            # 加载分类数据
-            categories_file = directory / "categories.json"
-            if categories_file.exists():
-                logger.info(f"找到类别数据文件: {categories_file}")
-                categories_size = categories_file.stat().st_size / (1024 * 1024)  # MB
-                logger.info(f"开始读取类别数据，文件大小: {categories_size:.2f} MB")
-                
-                json_start_time = time.time()
-                with open(categories_file, "r", encoding="utf-8") as f:
-                    categories_data = json.load(f)
-                json_time = time.time() - json_start_time
-                logger.info(f"类别数据JSON解析完成，耗时: {json_time:.2f}秒，包含 {len(categories_data)} 条数据")
-                
-                # 开始转换类别数据
-                process_start_time = time.time()
-                categories_count = 0
-                
-                if isinstance(categories_data, list):
-                    # 数组格式 [{}, {}, ...]
-                    logger.info(f"检测到数组格式的类别数据，开始处理 {len(categories_data)} 个类别")
-                    for i, cat_data in enumerate(categories_data):
-                        try:
-                            if i % 100 == 0 and i > 0:
-                                logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
-                            category = Category.from_dict(cat_data)
-                            self.categories[category.id] = category
-                            categories_count += 1
-                        except Exception as e:
-                            logger.error(f"加载类别 ID={cat_data.get('id', '未知')} 时出错: {e}")
-                else:
-                    # 字典格式 {"1": {}, "2": {}, ...}
-                    logger.info(f"检测到字典格式的类别数据，开始处理 {len(categories_data)} 个类别")
-                    for i, (cat_id, cat_data) in enumerate(categories_data.items()):
-                        try:
-                            if i % 100 == 0 and i > 0:
-                                logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
-                            category = Category.from_dict(cat_data)
-                            self.categories[int(cat_id)] = category
-                            categories_count += 1
-                        except Exception as e:
-                            logger.error(f"加载类别 ID={cat_id} 时出错: {e}")
-                
-                process_time = time.time() - process_start_time
-                logger.info(f"类别数据处理完成，耗时: {process_time:.2f}秒，成功加载 {categories_count} 个类别")
-            else:
-                logger.warning(f"未找到类别数据文件: {categories_file}")
+            # 重新连接Milvus
+            try:
+                connections.disconnect("default")  # 断开现有连接
+                connections.connect(
+                    "default", 
+                    host=config_data.get("host", "localhost"), 
+                    port=config_data.get("port", "19530")
+                )
+            except Exception as e:
+                logger.error(f"连接Milvus失败: {e}")
+                raise
         
-        # 尝试加载旧格式索引
+        # 获取或创建集合
+        self.setup_collection()
+        
+        # 加载分类数据
+        categories_file = directory / "categories.json"
+        if categories_file.exists():
+            logger.info(f"找到类别数据文件: {categories_file}")
+            categories_size = categories_file.stat().st_size / (1024 * 1024)  # MB
+            logger.info(f"开始读取类别数据，文件大小: {categories_size:.2f} MB")
+            
+            json_start_time = time.time()
+            with open(categories_file, "r", encoding="utf-8") as f:
+                categories_data = json.load(f)
+            json_time = time.time() - json_start_time
+            logger.info(f"类别数据JSON解析完成，耗时: {json_time:.2f}秒，包含 {len(categories_data)} 条数据")
+            
+            # 开始转换类别数据
+            process_start_time = time.time()
+            categories_count = 0
+            
+            if isinstance(categories_data, list):
+                # 数组格式 [{}, {}, ...]
+                logger.info(f"检测到数组格式的类别数据，开始处理 {len(categories_data)} 个类别")
+                for i, cat_data in enumerate(categories_data):
+                    try:
+                        if i % 100 == 0 and i > 0:
+                            logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
+                        category = Category.from_dict(cat_data)
+                        self.categories[category.id] = category
+                        categories_count += 1
+                    except Exception as e:
+                        logger.error(f"加载类别 ID={cat_data.get('id', '未知')} 时出错: {e}")
+            else:
+                # 字典格式 {"1": {}, "2": {}, ...}
+                logger.info(f"检测到字典格式的类别数据，开始处理 {len(categories_data)} 个类别")
+                for i, (cat_id, cat_data) in enumerate(categories_data.items()):
+                    try:
+                        if i % 100 == 0 and i > 0:
+                            logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
+                        category = Category.from_dict(cat_data)
+                        self.categories[int(cat_id)] = category
+                        categories_count += 1
+                    except Exception as e:
+                        logger.error(f"加载类别 ID={cat_id} 时出错: {e}")
+            
+            process_time = time.time() - process_start_time
+            logger.info(f"类别数据处理完成，耗时: {process_time:.2f}秒，成功加载 {categories_count} 个类别")
         else:
-            vectors_file = directory / "vectors.npy"
-            info_file = directory / "info.json"
-            
-            if vectors_file.exists() and info_file.exists():
-                logger.info(f"未找到FAISS索引文件，尝试加载旧格式数据")
-                logger.info(f"找到向量文件: {vectors_file} 和信息文件: {info_file}")
-                
-                # 加载向量
-                vectors_start_time = time.time()
-                vectors = np.load(vectors_file)
-                vectors_time = time.time() - vectors_start_time
-                logger.info(f"向量数据加载完成，耗时: {vectors_time:.2f}秒，形状: {vectors.shape}")
-                
-                # 加载名称和元数据
-                info_start_time = time.time()
-                with open(info_file, 'r', encoding='utf-8') as f:
-                    info = json.load(f)
-                info_time = time.time() - info_start_time
-                logger.info(f"信息数据加载完成，耗时: {info_time:.2f}秒，包含 {len(info['names'])} 个名称")
-                
-                # 构建索引
-                index_build_start = time.time()
-                self.index = faiss.IndexFlatL2(vectors.shape[1])
-                self.index.add(vectors.astype('float32'))
-                index_build_time = time.time() - index_build_start
-                logger.info(f"FAISS索引构建完成，耗时: {index_build_time:.2f}秒，向量数: {self.index.ntotal}")
-                
-                # 创建临时分类
-                logger.info(f"开始从旧格式创建临时分类对象")
-                for i, name in enumerate(info["names"]):
-                    category = Category(
-                        id=i+1,
-                        path=name,
-                        levels=[name],
-                        level_depth=1,
-                        description=f"Auto-generated category for {name}"
-                    )
-                    self.categories[category.id] = category
-                logger.info(f"临时分类对象创建完成，共 {len(self.categories)} 个")
-            else:
-                error_msg = f"无法加载索引: 目录 {directory} 中没有有效的索引文件"
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
+            logger.error(f"未找到类别数据文件: {categories_file}")
+            raise FileNotFoundError(f"类别数据文件不存在: {categories_file}")
         
-        # 记录总耗时
         total_time = time.time() - start_time
-        logger.info(f"索引加载完成，总耗时: {total_time:.2f}秒，加载了 {len(self.categories)} 个类别和 {self.index.ntotal} 个向量")
+        logger.info(f"加载完成，总耗时: {total_time:.2f}秒，加载了 {len(self.categories)} 个类别")

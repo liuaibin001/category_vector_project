@@ -26,7 +26,7 @@ class CategoryVectorConfig(BaseModel):
     # 向量存储配置
     index_type: str = Field(
         default="flat", 
-        description="FAISS索引类型: flat, ivf, hnsw等"
+        description="索引类型: flat, ivf, hnsw等"
     )
     nlist: int = Field(
         default=100, 
@@ -35,6 +35,20 @@ class CategoryVectorConfig(BaseModel):
     m_factor: int = Field(
         default=16, 
         description="HNSW索引的连接数"
+    )
+    
+    # Milvus配置
+    milvus_host: str = Field(
+        default="localhost", 
+        description="Milvus服务器地址"
+    )
+    milvus_port: str = Field(
+        default="19530", 
+        description="Milvus服务器端口"
+    )
+    collection_name: str = Field(
+        default="category_vectors", 
+        description="Milvus集合名称"
     )
     
     # 搜索配置
