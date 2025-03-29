@@ -1,0 +1,108 @@
+[
+    {
+      "id": "1",
+      "name": "电子产品",
+      "description": "各种电子设备和数码产品",
+      "parent_id": null,
+      "level": 1
+    },
+    {
+      "id": "1.1",
+      "name": "手机",
+      "description": "移动通信设备，包括智能手机和功能手机",
+      "parent_id": "1",
+      "level": 2
+    },
+    {
+      "id": "1.1.1",
+      "name": "智能手机",
+      "description": "具有高级操作系统的触屏手机",
+      "parent_id": "1.1",
+      "level": 3
+    },
+    {
+      "id": "1.1.2",
+      "name": "功能手机",
+      "description": "以通话和短信为主要功能的基础手机",
+      "parent_id": "1.1",
+      "level": 3
+    },
+    {
+      "id": "1.2",
+      "name": "电脑",
+      "description": "计算机设备，包括台式机、笔记本电脑",
+      "parent_id": "1",
+      "level": 2
+    },
+    {
+      "id": "1.2.1",
+      "name": "笔记本电脑",
+      "description": "便携式个人电脑",
+      "parent_id": "1.2",
+      "level": 3
+    },
+    {
+      "id": "1.2.2",
+      "name": "台式电脑",
+      "description": "固定式个人电脑",
+      "parent_id": "1.2",
+      "level": 3
+    },
+    {
+      "id": "1.3",
+      "name": "相机",
+      "description": "用于拍摄照片和视频的设备",
+      "parent_id": "1",
+      "level": 2
+    },
+    {
+      "id": "2",
+      "name": "服装",
+      "description": "各种衣物和服饰",
+      "parent_id": null,
+      "level": 1
+    },
+    {
+      "id": "2.1",
+      "name": "男装",
+      "description": "男性服装",
+      "parent_id": "2",
+      "level": 2
+    },
+    {
+      "id": "2.2",
+      "name": "女装",
+      "description": "女性服装",
+      "parent_id": "2",
+      "level": 2
+    },
+    {
+      "id": "2.3",
+      "name": "童装",
+      "description": "儿童服装",
+      "parent_id": "2",
+      "level": 2
+    },
+    {
+      "id": "3",
+      "name": "食品",
+      "description": "各种食品和饮料",
+      "parent_id": null,
+      "level": 1
+    },
+    {
+      "id": "3.1",
+      "name": "零食",
+      "description": "休闲食品和小吃",
+      "parent_id": "3",
+      "level": 2
+    },
+    {
+      "id": "3.2",
+      "name": "饮料",
+      "description": "各种饮用水和饮品",
+      "parent_id": "3",
+      "level": 2
+    }
+  ]
+  

@@ -1,0 +1,48 @@
+[tool.poetry]
+name = "categoryvector"
+version = "0.1.0"
+description = "A package for category vector generation and management"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "categoryvector", from = "src"}]
+
+[tool.poetry.dependencies]
+python = ">=3.8,<4.0"
+numpy = "^1.21.0"
+pandas = "^1.3.0"
+scikit-learn = "^0.24.0"
+sentence-transformers = "^2.2.0"
+faiss-cpu = "^1.7.0"
+pydantic = "^2.0.0"
+loguru = "^0.6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^6.0"
+pytest-cov = "^2.0"
+black = "^21.0"
+isort = "^5.0"
+flake8 = "^3.9"
+mypy = "^1.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --cov=categoryvector"
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+
+[tool.poetry.scripts]
+v = "categoryvector.cli:main"
+build = "categoryvector.cli:build_index"
+search = "categoryvector.cli:search"
