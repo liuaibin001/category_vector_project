@@ -3,104 +3,115 @@
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from typing import Dict, List, Optional, Tuple, Union
+from transformers import AutoTokenizer, AutoModel
+import torch
 
 from categoryvector.config import CategoryVectorConfig
 from categoryvector.data_processing import CategoryNode, CategoryProcessor
 from categoryvector.utils.logging_utils import default_logger as logger
+from .models import Category
 
 
 class VectorGenerator:
-    """向量生成器，负责将类别文本转换为向量表示."""
+    """向量生成器"""
     
-    def __init__(self, config: CategoryVectorConfig):
-        """初始化向量生成器.
+    def __init__(self, model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", config: Optional[CategoryVectorConfig] = None):
+        """初始化向量生成器
         
         Args:
-            config: 配置对象
+            model_name: 使用的模型名称
+            config: 配置对象，可选
         """
         self.config = config
-        logger.info(f"正在加载模型: {config.model_name}")
-        try:
-            self.model = SentenceTransformer(config.model_name)
-            logger.info(f"模型加载成功，向量维度: {self.model.get_sentence_embedding_dimension()}")
-        except Exception as e:
-            logger.error(f"模型加载失败: {str(e)}")
-            raise
-    
-    def generate_vectors(
-        self, 
-        category_texts: List[Tuple[str, str]]
-    ) -> Tuple[np.ndarray, List[str]]:
-        """为所有类别生成向量.
+        self.model = SentenceTransformer(model_name)
+        
+    def generate_category_vector(self, category: Category) -> np.ndarray:
+        """生成分类的完整向量表示
         
         Args:
-            category_texts: (类别ID, 文本)元组的列表
+            category: 分类对象
             
         Returns:
-            (向量数组, 类别ID列表)的元组
+            分类的向量表示
         """
-        # 提取文本和ID
-        ids = [item[0] for item in category_texts]
-        texts = [item[1] for item in category_texts]
+        # 组合所有文本信息
+        texts = [
+            category.path,
+            category.description or "",
+            " ".join(category.keywords),
+            " ".join(category.examples)
+        ]
+        text = " ".join(filter(None, texts))
         
-        logger.info(f"正在为 {len(texts)} 个类别生成向量")
-        
-        # 批量生成向量
-        vectors = self.model.encode(
-            texts, 
-            show_progress_bar=True, 
-            normalize_embeddings=True
-        )
-        
-        logger.info(f"向量生成完成，向量维度: {vectors.shape[1]}")
-        return vectors, ids
+        # 生成向量
+        return self.model.encode(text)
     
-    def generate_query_vector(self, query_text: str) -> np.ndarray:
-        """为查询文本生成向量.
+    def generate_level_vectors(self, category: Category) -> Dict[str, np.ndarray]:
+        """生成各层级的向量表示
         
         Args:
-            query_text: 查询文本
+            category: 分类对象
             
         Returns:
-            查询向量
+            各层级的向量表示字典
         """
-        logger.debug(f"为查询生成向量: {query_text}")
-        vector = self.model.encode(
-            query_text, 
-            normalize_embeddings=True
-        )
-        return vector
+        vectors = {}
+        
+        for i, level in enumerate(category.levels):
+            # 构建层级文本
+            if i == 0:
+                level_text = level
+            else:
+                # 添加上下文
+                level_text = f"{category.levels[i-1]} > {level}"
+            
+            # 生成向量
+            vectors[f"level_{i+1}"] = self.model.encode(level_text)
+            
+        return vectors
     
-    def find_similar_categories(
-        self,
-        vectors: np.ndarray,
-        names: List[str],
-        query_text: str,
-        top_k: int = 5
-    ) -> List[Tuple[str, float]]:
-        """查找与查询文本最相似的类别.
+    def generate_exclusion_vector(self, exclusions: List[str]) -> np.ndarray:
+        """生成排除词的向量表示
         
         Args:
-            vectors: 类别向量数组
-            names: 类别名称列表
-            query_text: 查询文本
-            top_k: 返回结果数量
+            exclusions: 排除词列表
             
         Returns:
-            (类别名称, 相似度)元组的列表
+            排除词的向量表示
         """
-        # 生成查询向量
-        query_vector = self.generate_query_vector(query_text)
+        if not exclusions:
+            return np.zeros(self.model.get_sentence_embedding_dimension())
         
-        # 计算相似度
-        similarities = np.dot(vectors, query_vector)
+        # 生成每个排除词的向量
+        exclusion_vectors = [self.model.encode(ex) for ex in exclusions]
         
-        # 获取最相似的类别
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        # 取平均向量
+        return np.mean(exclusion_vectors, axis=0)
+    
+    def generate_query_vector(self, query: str) -> np.ndarray:
+        """生成查询文本的向量表示
         
-        # 返回结果
-        results = []
-        for idx in top_indices:
-            results.append((names[idx], similarities[idx]))
+        Args:
+            query: 查询文本
+            
+        Returns:
+            查询文本的向量表示
+        """
+        return self.model.encode(query)
+    
+    def enrich_category_vectors(self, category: Category) -> Category:
+        """为分类对象生成所有向量
         
-        return results
+        Args:
+            category: 分类对象
+            
+        Returns:
+            添加了向量的分类对象
+        """
+        # 生成完整向量
+        category.vector = self.generate_category_vector(category)
+        
+        # 生成层级向量
+        category.level_vectors = self.generate_level_vectors(category)
+        
+        return category

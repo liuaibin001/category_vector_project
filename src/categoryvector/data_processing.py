@@ -3,11 +3,13 @@
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
+import logging
 
 from loguru import logger
 
 from categoryvector.config import CategoryVectorConfig
 from categoryvector.utils.logging_utils import default_logger as logger
+from .models import Category
 
 
 class CategoryNode:
@@ -101,85 +103,161 @@ class CategoryNode:
 
 
 class CategoryProcessor:
-    """类别数据处理器，负责加载和处理分类数据."""
+    """分类数据处理器"""
     
-    def __init__(self, config: CategoryVectorConfig):
-        """初始化处理器.
+    def __init__(self, config: Optional[CategoryVectorConfig] = None):
+        """初始化数据处理器
         
         Args:
-            config: 配置对象
+            config: 配置对象，可选
         """
         self.config = config
-        self.category_map: Dict[str, CategoryNode] = {}
-        self.root_categories: List[CategoryNode] = []
-    
-    def load_from_json(self, file_path: Union[str, Path]) -> None:
-        """从JSON文件加载类别数据.
+        self.categories: Dict[int, Category] = {}
+        
+    def load_from_json(self, file_path: Path) -> None:
+        """从JSON文件加载分类数据
         
         Args:
             file_path: JSON文件路径
         """
-        file_path = Path(file_path)
-        logger.info(f"从 {file_path} 加载类别数据")
-        
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                categories_data = json.load(f)
+                data = json.load(f)
+                
+            # 处理数据
+            if isinstance(data, list):
+                # 处理数组格式
+                for category_data in data:
+                    try:
+                        # 确保必要字段存在
+                        if not all(k in category_data for k in ['id', 'path', 'levels', 'level_depth']):
+                            logger.warning(f"分类 {category_data.get('id', '未知')} 缺少必要字段，已跳过")
+                            continue
+                            
+                        # 创建分类对象
+                        category = Category.from_dict(category_data)
+                        self.categories[category.id] = category
+                        
+                    except Exception as e:
+                        logger.error(f"处理分类 {category_data.get('id', '未知')} 时发生错误: {e}")
+                        continue
+            else:
+                # 处理字典格式 {"1": {}, "2": {}, ...}
+                for cat_id, cat_data in data.items():
+                    try:
+                        # 确保必要字段存在
+                        if not all(k in cat_data for k in ['id', 'path', 'levels', 'level_depth']):
+                            logger.warning(f"分类 {cat_id} 缺少必要字段，已跳过")
+                            continue
+                            
+                        # 创建分类对象
+                        category = Category.from_dict(cat_data)
+                        self.categories[category.id] = category
+                        
+                    except Exception as e:
+                        logger.error(f"处理分类 {cat_id} 时发生错误: {e}")
+                        continue
+                    
+            logger.info(f"成功加载 {len(self.categories)} 个分类")
             
-            # 第一遍：创建所有节点
-            for cat_data in categories_data:
-                node = CategoryNode(
-                    id=cat_data['id'],
-                    name=cat_data['name'],
-                    description=cat_data.get('description'),
-                    parent_id=cat_data.get('parent_id'),
-                    level=cat_data.get('level', 0)
-                )
-                self.category_map[node.id] = node
-            
-            # 第二遍：构建层次结构
-            for cat_id, node in self.category_map.items():
-                if node.parent_id:
-                    if node.parent_id in self.category_map:
-                        self.category_map[node.parent_id].add_child(node)
-                    else:
-                        logger.warning(f"类别 {node.id} 的父类别 {node.parent_id} 不存在")
-                else:
-                    self.root_categories.append(node)
-            
-            logger.info(f"成功加载 {len(self.category_map)} 个类别，{len(self.root_categories)} 个根类别")
-        
         except Exception as e:
-            logger.error(f"加载类别数据失败: {str(e)}")
+            logger.error(f"加载分类数据时发生错误: {e}")
             raise
-    
-    def get_all_categories(self) -> List[CategoryNode]:
-        """获取所有类别节点.
-        
-        Returns:
-            所有类别节点列表
-        """
-        return list(self.category_map.values())
-    
-    def get_category_by_id(self, category_id: str) -> Optional[CategoryNode]:
-        """通过ID获取类别节点.
+            
+    def save_to_json(self, file_path: Path) -> None:
+        """保存分类数据到JSON文件
         
         Args:
-            category_id: 类别ID
+            file_path: 保存路径
+        """
+        try:
+            # 转换为字典格式
+            data = {
+                str(cat.id): cat.to_dict()
+                for cat in self.categories.values()
+            }
+            
+            # 保存到文件
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                
+            logger.info(f"成功保存 {len(self.categories)} 个分类到 {file_path}")
+            
+        except Exception as e:
+            logger.error(f"保存分类数据时发生错误: {e}")
+            raise
+            
+    def get_category_by_id(self, category_id: int) -> Optional[Category]:
+        """根据ID获取分类
+        
+        Args:
+            category_id: 分类ID
             
         Returns:
-            类别节点，如果不存在则返回None
+            分类对象，如果不存在则返回None
         """
-        return self.category_map.get(category_id)
-    
-    def get_category_texts_for_embedding(self) -> List[Tuple[str, str]]:
-        """获取所有类别的文本表示，用于生成嵌入向量.
+        return self.categories.get(category_id)
         
+    def get_categories_by_level(self, level: int) -> List[Category]:
+        """获取指定层级的所有分类
+        
+        Args:
+            level: 目标层级
+            
         Returns:
-            (类别ID, 文本表示)元组的列表
+            分类对象列表
         """
-        texts = []
-        for category_id, node in self.category_map.items():
-            text = node.get_text_for_embedding(self.category_map)
-            texts.append((category_id, text))
-        return texts
+        return [
+            cat for cat in self.categories.values()
+            if cat.level_depth == level
+        ]
+        
+    def get_child_categories(self, parent_id: int) -> List[Category]:
+        """获取指定分类的所有子分类
+        
+        Args:
+            parent_id: 父分类ID
+            
+        Returns:
+            子分类对象列表
+        """
+        parent = self.get_category_by_id(parent_id)
+        if not parent:
+            return []
+            
+        return [
+            cat for cat in self.categories.values()
+            if cat.level_depth == parent.level_depth + 1
+            and cat.path.startswith(parent.path)
+        ]
+        
+    def enrich_category_data(
+        self,
+        category: Category,
+        description: Optional[str] = None,
+        keywords: Optional[List[str]] = None,
+        examples: Optional[List[str]] = None,
+        exclusions: Optional[List[str]] = None
+    ) -> Category:
+        """丰富分类数据
+        
+        Args:
+            category: 分类对象
+            description: 分类描述
+            keywords: 关键词列表
+            examples: 样例列表
+            exclusions: 排除词列表
+            
+        Returns:
+            更新后的分类对象
+        """
+        if description:
+            category.description = description
+        if keywords:
+            category.keywords = keywords
+        if examples:
+            category.examples = examples
+        if exclusions:
+            category.exclusions = exclusions
+            
+        return category

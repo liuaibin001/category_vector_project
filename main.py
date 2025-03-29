@@ -16,6 +16,7 @@ from categoryvector.data_processing import CategoryProcessor
 from categoryvector.vector_generation import VectorGenerator
 from categoryvector.vector_storage import VectorStorage
 from categoryvector.utils.logging_utils import setup_logger
+from categoryvector.models import Category
 
 
 def parse_args():
@@ -31,8 +32,10 @@ def parse_args():
                              help="类别数据JSON文件路径")
     build_parser.add_argument("--output", "-o", required=True, type=str,
                              help="输出索引目录")
-    build_parser.add_argument("--model", "-m", default="paraphrase-multilingual-MiniLM-L12-v2", type=str,
+    build_parser.add_argument("--model", "-m", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", type=str,
                              help="使用的向量模型名称")
+    build_parser.add_argument("--enrich", "-e", action="store_true",
+                             help="是否使用大模型丰富分类数据")
     
     # 搜索子命令
     search_parser = subparsers.add_parser("search", help="搜索类别")
@@ -42,8 +45,10 @@ def parse_args():
                               help="搜索查询文本")
     search_parser.add_argument("--top-k", "-k", default=5, type=int,
                               help="返回结果数量")
-    search_parser.add_argument("--model", "-m", default="paraphrase-multilingual-MiniLM-L12-v2", type=str,
-                              help="使用的向量模型名称")
+    search_parser.add_argument("--threshold", "-t", default=0.6, type=float,
+                              help="相似度阈值")
+    search_parser.add_argument("--level", "-l", type=int,
+                              help="指定搜索层级")
     
     # 通用参数
     parser.add_argument("--log-level", default="INFO", type=str,
@@ -64,30 +69,41 @@ def build_index(args):
         log_level=args.log_level
     )
     
+    # 加载类别数据
     logger.info(f"加载类别数据: {args.categories}")
     processor = CategoryProcessor(config)
     processor.load_from_json(args.categories)
     logger.info(f"加载了 {len(processor.categories)} 个类别")
     
-    logger.info(f"使用模型 {args.model} 生成向量")
-    generator = VectorGenerator(config)
-    id_to_vector = generator.generate_vectors(processor)
-    logger.info(f"生成了 {len(id_to_vector)} 个向量")
+    # 丰富分类数据
+    if args.enrich:
+        logger.info("使用大模型丰富分类数据")
+        # TODO: 实现大模型丰富数据的逻辑
     
+    # 生成向量
+    logger.info(f"使用模型 {args.model} 生成向量")
+    generator = VectorGenerator(model_name=args.model, config=config)
+    
+    # 为每个分类生成向量
+    for category in processor.categories.values():
+        category = generator.enrich_category_vectors(category)
+    
+    # 构建向量索引
     logger.info("构建向量索引")
-    storage = VectorStorage(config)
-    storage.build_index(id_to_vector, processor)
+    storage = VectorStorage(
+        dimension=generator.model.get_sentence_embedding_dimension(),
+        config=config
+    )
+    for category in processor.categories.values():
+        storage.add_category(category)
     
     # 创建输出目录
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # 保存索引和分类数据
     logger.info(f"保存索引到 {output_dir}")
     storage.save(output_dir)
-    
-    # 保存类别数据
-    categories_file = output_dir / "categories.json"
-    processor.save_to_json(categories_file)
     
     logger.info("索引构建完成")
 
@@ -98,40 +114,49 @@ def search(args):
     
     # 创建配置
     config = CategoryVectorConfig(
-        model_name=args.model,
+        model_name="paraphrase-multilingual-MiniLM-L12-v2",  # 默认模型
         data_dir=Path(args.index),
         log_level=args.log_level
     )
     
     # 加载索引和类别数据
     logger.info(f"加载索引: {args.index}")
-    storage = VectorStorage(config)
+    storage = VectorStorage(384)  # 默认维度
     storage.load(args.index)
-    
-    logger.info("加载类别数据")
-    processor = CategoryProcessor(config)
-    processor.load_from_json(Path(args.index) / "categories.json")
     
     # 生成查询向量
     logger.info(f"查询: {args.query}")
-    generator = VectorGenerator(config)
+    generator = VectorGenerator(model_name=config.model_name, config=config)
     query_vector = generator.generate_query_vector(args.query)
     
-    # 搜索
-    results = storage.search(query_vector, top_k=args.top_k)
+    # 执行搜索
+    if args.level:
+        # 按层级搜索
+        results = storage.search_by_level(
+            query_vector,
+            level=args.level,
+            top_k=args.top_k,
+            threshold=args.threshold
+        )
+    else:
+        # 全局搜索
+        results = storage.search(
+            query_vector,
+            top_k=args.top_k,
+            threshold=args.threshold
+        )
     
     # 打印结果
     print(f"\n查询: {args.query}")
     print("=" * 50)
-    print(f"{'ID':<10} {'相似度':<10} {'名称':<20} {'描述'}")
+    print(f"{'ID':<10} {'相似度':<10} {'路径':<30} {'描述'}")
     print("-" * 50)
     
-    for result in results:
-        category = processor.get_category_by_id(result["id"])
+    for category, score in results:
         description = category.description if category.description else ""
         if len(description) > 50:
             description = description[:47] + "..."
-        print(f"{category.id:<10} {result['score']:.4f}     {category.name:<20} {description}")
+        print(f"{category.id:<10} {score:.4f}     {category.path:<30} {description}")
 
 
 def main():

@@ -43,6 +43,7 @@ profile = "black"
 multi_line_output = 3
 
 [tool.poetry.scripts]
+build = "categoryvector.cli:main"
+search = "categoryvector.cli:main"
 v = "categoryvector.cli:main"
-build = "categoryvector.cli:build_index"
-search = "categoryvector.cli:search"
+categoryvector = "categoryvector.cli:main"
