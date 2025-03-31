@@ -9,9 +9,9 @@ port = "19530"
 collection_name = "category_vectors"
 
 [redis]
-host = "localhost"
+host = "192.168.1.18"
 port = 6379
-db = 0
+db = 9
 password = ""
 socket_timeout = 5
 socket_connect_timeout = 5
@@ -20,7 +20,7 @@ prefix = "categoryvector:"
 ttl = 86400  # 默认缓存过期时间，24小时
 
 [search]
-threshold = 0.3
+threshold = 0.1
 top_k = 10
 similarity_metric = "IP"  # IP表示余弦相似度，L2表示欧氏距离
 

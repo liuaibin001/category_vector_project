@@ -9,15 +9,19 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import shutil
 from tqdm import tqdm
+import json
+import time
 
 import numpy as np
-from pymilvus import utility
+from pymilvus import utility, connections
 
 from categoryvector.config import CategoryVectorConfig
 from categoryvector.data_processing import CategoryProcessor
 from categoryvector.vector_generation import VectorGenerator
 from categoryvector.vector_storage import VectorStorage
-from categoryvector.utils.logging_utils import setup_logger
+from categoryvector.utils.logging_utils import setup_logger, default_logger as logger
+from categoryvector.utils.redis_client import redis_client
+from categoryvector.models import Category
 
 
 def parse_build_args(args=None):
@@ -239,192 +243,208 @@ def parse_update_args(args=None):
     return parser.parse_args(args)
 
 
-def build_index(args=None):
-    """构建索引"""
-    if args is None:
-        args = parse_build_args()
+def build_index(categories_file: str, output_dir: Optional[str] = None, config: Optional[CategoryVectorConfig] = None):
+    """构建索引.
     
-    # 加载配置文件
-    config = CategoryVectorConfig.from_toml(args.config if hasattr(args, 'config') else None)
-    print(f"通过 from_toml 加载的配置: milvus_host={config.milvus_host}, milvus_port={config.milvus_port}")
-    
-    # 处理详细日志模式
-    if args.verbose:
-        args.log_level = "DEBUG"
+    Args:
+        categories_file: 分类数据文件路径
+        output_dir: 输出目录
+        config: 配置对象，可选
+    """
+    start_time = time.time()
+    categories_file = Path(categories_file)
+    if output_dir:
+        output_dir = Path(output_dir)
+    else:
+        output_dir = Path("data/vectors")
         
-    # 命令行参数覆盖配置文件
-    log_level = args.log_level or config.log_level
+    print(f"开始构建索引，输入文件: {categories_file}")
     
-    # 设置日志
-    logger = setup_logger("categoryvector", level=log_level)
+    # 检查输入文件
+    if not categories_file.exists():
+        print(f"错误: 输入文件不存在: {categories_file}")
+        return
     
-    logger.info(f"开始构建索引过程...")
+    # 确保配置对象存在
+    if config is None:
+        config = CategoryVectorConfig()
     
+    # 尝试连接 Milvus
     try:
-        # 参数覆盖配置
-        print(f"命令行参数: milvus_host={args.milvus_host}, milvus_port={args.milvus_port}")
+        # 从配置中获取连接信息
+        host = config.milvus_host
+        port = config.milvus_port
         
-        model_name = args.model or config.model_name
-        vector_dim = args.vector_dim or config.vector_dim
-        milvus_host = args.milvus_host or config.milvus_host
-        milvus_port = args.milvus_port or config.milvus_port
-        
-        print(f"合并后的 Milvus 参数: host={milvus_host}, port={milvus_port}")
-        logger.debug(f"合并后的 Milvus 参数: host={milvus_host}, port={milvus_port}")
-        
-        collection_name = args.collection_name or config.collection_name
-        index_type = args.index_type or config.index_type
-        output_dir = args.output or (config.output_dir if config.output_dir else "data/vectors")
-        
-        logger.info(f"参数信息: 类别数据={args.categories}, 输出目录={output_dir}, 向量维度={vector_dim}, 模型={model_name}, 日志级别={log_level}")
-        logger.info(f"Milvus配置: 主机={milvus_host}, 端口={milvus_port}, 集合={collection_name}")
-        
-        # 创建配置
-        logger.info(f"正在创建配置...")
-        build_config = CategoryVectorConfig(
-            model_name=model_name,
-            data_dir=Path(args.categories).parent,
-            log_level=log_level,
-            vector_dim=vector_dim,
-            # 添加Milvus配置参数
-            milvus_host=milvus_host,
-            milvus_port=milvus_port,
-            collection_name=collection_name,
-            index_type=index_type,
-            # 添加其他配置参数
-            output_dir=output_dir,
-            top_k=config.top_k,
-            similarity_threshold=config.similarity_threshold,
-            nlist=config.nlist,
-            m_factor=config.m_factor
-        )
-        
-        # 创建存储实例并检查 Milvus 连通性
-        logger.info("检查 Milvus 服务器连通性...")
-        logger.debug(f"传递给 VectorStorage 的配置: milvus_host={build_config.milvus_host}, milvus_port={build_config.milvus_port}")
-        storage = VectorStorage(dimension=vector_dim, config=build_config)
+        print(f"正在连接 Milvus 服务器: {host}:{port}...")
         try:
-            storage.connect_to_milvus()
-        except ConnectionError as e:
-            logger.error(f"Milvus 服务器连接失败: {e}")
-            logger.error("请检查 Milvus 服务器是否正在运行，以及网络连接是否正常")
-            sys.exit(1)
+            # 断开可能存在的连接
+            connections.disconnect("default")
+        except:
+            pass
             
-        # Milvus 连接成功后，删除输出目录和 Milvus 集合
-        output_path = Path(output_dir)
-        if output_path.exists():
-            try:
-                logger.info(f"删除现有输出目录: {output_path}")
-                shutil.rmtree(output_path)
-                logger.info(f"成功删除输出目录: {output_path}")
-            except Exception as e:
-                logger.warning(f"删除输出目录时出错: {e}")
-        
-        # 删除现有 Milvus 集合
-        try:
-            if utility.has_collection(collection_name):
-                logger.info(f"删除现有 Milvus 集合: {collection_name}")
-                utility.drop_collection(collection_name)
-                logger.info(f"成功删除 Milvus 集合: {collection_name}")
-        except Exception as e:
-            logger.warning(f"删除 Milvus 集合时出错: {e}")
-            
-        logger.debug(f"配置已创建: 模型={build_config.model_name}, 向量维度={build_config.vector_dim}, Milvus主机={build_config.milvus_host}, Milvus端口={build_config.milvus_port}")
-        
-        # 加载类别数据
-        categories_file = Path(args.categories)
-        logger.info(f"正在加载类别数据: {categories_file}")
-        processor = CategoryProcessor(build_config)
-        processor.load_from_json(categories_file)
-        
-        categories_count = len(processor.categories)
-        logger.info(f"成功加载 {categories_count} 个类别")
-        if categories_count > 0 and log_level == "DEBUG":
-            # 在DEBUG级别输出一些分类样例
-            sample_size = min(3, categories_count)
-            sample_categories = list(processor.categories.values())[:sample_size]
-            for i, cat in enumerate(sample_categories):
-                logger.debug(f"分类样例 {i+1}/{sample_size}: ID={cat.id}, 路径={cat.path}, 层级={cat.level_depth}")
-        
-        # 生成向量
-        logger.info(f"开始加载模型: {build_config.model_name}")
-        generator = VectorGenerator(model_name=build_config.model_name, config=build_config)
-        logger.info(f"模型加载完成，向量维度: {generator.model.get_sentence_embedding_dimension()}")
-        
-        # 为每个分类生成向量 - 使用并行处理加速
-        logger.info(f"开始为 {categories_count} 个分类生成向量...")
-        total_categories = categories_count
-        
-        # 获取所有分类
-        all_categories = list(processor.categories.values())
-        
-        # 并行处理 - 使用batch_enrich_category_vectors中的进度条，这里不需要额外的进度条
-        try:
-            # 调用并行处理方法
-            enriched_categories = generator.batch_enrich_category_vectors(
-                all_categories, 
-                max_workers=args.workers
-            )
-            
-            # 更新分类词典
-            for category in enriched_categories:
-                processor.categories[category.id] = category
-                
-        except Exception as e:
-            logger.error(f"并行生成向量时出错: {e}")
-            sys.exit(1)
-                
-        logger.info(f"所有分类向量生成完成")
-        
-        # 构建向量索引
-        logger.info("开始构建Milvus向量索引...")
-        
-        # 使用批量添加来提高性能
-        logger.info(f"开始批量添加 {total_categories} 个分类到索引...")
-        
-        # 准备批量处理
-        batch_size = args.batch_size or 100  # 每批次处理100个分类
-        
-        # 使用tqdm创建进度条显示整体进度
-        with tqdm(total=total_categories, desc="构建索引", unit="类别") as pbar:
-            # 收集所有分类为列表，以便批量处理
-            categories_list = list(processor.categories.values())
-            
-            # 批量添加分类
-            try:
-                storage.batch_add_categories(categories_list, batch_size=batch_size)
-                # 更新进度条到完成
-                pbar.update(total_categories)
-                pbar.set_postfix({"完成": "100.0%"})
-            except Exception as e:
-                logger.error(f"批量添加分类到索引时出错: {e}")
-                
-            # 显示添加结果
-            added_count = len(storage.categories)
-                
-        logger.info(f"索引构建完成，共添加了 {added_count} 个分类")
-        
-        # 创建输出目录
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # 保存索引和分类数据
-        logger.info(f"开始保存索引到 {output_path}")
-        storage.save(output_path)
-        
-        # 输出索引统计信息
-        logger.info(f"索引保存完成:")
-        logger.info(f"- Milvus集合名称: {build_config.collection_name}")
-        logger.info(f"- Milvus主机地址: {build_config.milvus_host}:{build_config.milvus_port}")
-        logger.info(f"- 索引类型: {build_config.index_type}")
-        logger.info(f"- 总类别数量: {len(storage.categories)}")
-        logger.info(f"- 向量维度: {build_config.vector_dim}")
-        
-        logger.info("索引构建过程成功完成")
-    
+        # 尝试建立连接
+        connections.connect("default", host=host, port=port)
+        print(f"✓ Milvus 连接成功")
     except Exception as e:
-        logger.exception(f"构建索引时发生错误: {e}")
-        sys.exit(1)
+        print(f"✗ Milvus 连接失败: {host}:{port}, 错误: {e}")
+        print("请检查 Milvus 服务器是否正在运行")
+        return
+        
+    # 检查是否存在已生成的向量数据
+    existing_vectors_path = Path("data/vectors")
+    if existing_vectors_path.exists():
+        print(f"发现已存在的向量数据目录，正在检查...")
+        
+        # 检查必要的文件是否存在
+        categories_json = existing_vectors_path / "categories.json"
+        milvus_config = existing_vectors_path / "milvus_config.json"
+        
+        if categories_json.exists() and milvus_config.exists():
+            print("找到完整的向量数据文件，正在验证...")
+            
+            try:
+                # 加载 Milvus 配置
+                with open(milvus_config, "r", encoding="utf-8") as f:
+                    saved_config = json.load(f)
+                
+                # 验证配置是否匹配
+                if (
+                    str(config.milvus_port) != str(saved_config.get("port")) or
+                    config.milvus_host != saved_config.get("host") or
+                    config.collection_name != saved_config.get("collection_name")
+                ):
+                    print("✗ 现有配置与当前配置不匹配，将重新构建向量")
+                else:
+                    # 加载分类数据
+                    print("正在加载现有类别数据...")
+                    with open(categories_json, "r", encoding="utf-8") as f:
+                        categories_data = json.load(f)
+                    
+                    # 转换为 Category 对象
+                    categories = []
+                    
+                    with tqdm(total=len(categories_data), desc="加载分类", unit="个") as pbar:
+                        for cat_data in categories_data:
+                            try:
+                                category = Category.from_dict(cat_data)
+                                categories.append(category)
+                            except Exception:
+                                pass  # 静默忽略错误
+                            finally:
+                                pbar.update(1)
+                    
+                    if categories:
+                        print(f"✓ 成功加载 {len(categories)} 个现有类别")
+                        
+                        # 初始化向量存储
+                        storage = VectorStorage(
+                            dimension=config.vector_dim,
+                            config=config
+                        )
+                        
+                        # 检查并删除现有集合
+                        collection_name = config.collection_name
+                        try:
+                            if utility.has_collection(collection_name):
+                                print(f"正在删除现有 Milvus 集合: {collection_name}...")
+                                utility.drop_collection(collection_name)
+                        except Exception:
+                            pass
+                              
+                        # 批量添加到 Milvus
+                        print("正在将类别添加到 Milvus...")
+                        storage.batch_add_categories(categories)
+                        
+                        # 保存到新的输出目录
+                        print(f"正在保存到输出目录: {output_dir}...")
+                        storage.save(output_dir)
+                        
+                        # 更新 Redis
+                        print("正在更新 Redis...")
+                        redis_success = storage.save_to_redis()
+                        if redis_success:
+                            print("✓ Redis 更新成功")
+                        else:
+                            print("✗ Redis 更新失败")
+                        
+                        total_time = time.time() - start_time
+                        print(f"\n构建索引完成:")
+                        print(f"- 总类别数量: {len(storage.categories)}")
+                        print(f"- 向量维度: {config.vector_dim}")
+                        print(f"- Milvus主机: {config.milvus_host}:{config.milvus_port}")
+                        print(f"- 总耗时: {total_time:.2f}秒")
+                        return
+                    else:
+                        print("✗ 没有找到有效的类别数据，将重新构建向量")
+                        
+            except Exception as e:
+                print(f"✗ 加载现有向量数据时出错: {str(e)}")
+                print("将重新构建向量")
+    
+    # 如果没有现有数据或加载失败，重新构建向量
+    print("\n开始重新构建向量...\n")
+    
+    # 加载分类数据
+    print("正在加载分类数据...")
+    processor = CategoryProcessor(config)
+    processor.load_from_json(categories_file)
+    categories = list(processor.categories.values())
+    
+    if not categories:
+        print("错误: 没有找到有效的分类数据")
+        return
+        
+    print(f"✓ 成功加载 {len(categories)} 个分类")
+    
+    # 生成向量
+    print(f"\n正在加载模型: {config.model_name}...")
+    generator = VectorGenerator(
+        model_name=config.model_name,
+        config=config
+    )
+    
+    # 批量生成向量
+    print("\n开始生成向量:")
+    enriched_categories = generator.batch_enrich_category_vectors(categories)
+    print(f"✓ 完成 {len(enriched_categories)} 个分类的向量生成")
+    
+    # 初始化向量存储
+    storage = VectorStorage(
+        dimension=config.vector_dim,
+        config=config
+    )
+    
+    # 检查并删除现有集合
+    collection_name = config.collection_name
+    try:
+        if utility.has_collection(collection_name):
+            print(f"正在删除现有 Milvus 集合: {collection_name}...")
+            utility.drop_collection(collection_name)
+    except Exception:
+        pass
+    
+    # 批量添加到 Milvus
+    print("\n正在添加向量到 Milvus...")
+    storage.batch_add_categories(enriched_categories)
+    
+    # 保存到输出目录
+    print(f"\n正在保存到目录: {output_dir}...")
+    storage.save(output_dir)
+    
+    # 更新 Redis
+    print("\n正在更新 Redis...")
+    redis_success = storage.save_to_redis()
+    if redis_success:
+        print("✓ Redis 更新成功")
+    else:
+        print("✗ Redis 更新失败")
+    
+    total_time = time.time() - start_time
+    print(f"\n构建索引完成:")
+    print(f"- 总类别数量: {len(storage.categories)}")
+    print(f"- 向量维度: {config.vector_dim}")
+    print(f"- Milvus主机: {config.milvus_host}:{config.milvus_port}")
+    print(f"- 总耗时: {total_time:.2f}秒")
 
 
 def search(args=None):
@@ -482,23 +502,14 @@ def search(args=None):
             logger.error("请检查 Milvus 服务器是否正在运行，以及网络连接是否正常")
             sys.exit(1)
         
-        # 加载索引和类别数据
-        logger.info(f"加载索引: {args.index}")
+        # 初始化Milvus集合
+        logger.info("初始化Milvus集合...")
         try:
-            storage.load(index_path)
+            storage.setup_collection()
         except Exception as e:
-            logger.error(f"加载索引失败: {e}")
+            logger.error(f"初始化Milvus集合失败: {e}")
             sys.exit(1)
             
-        if not storage.categories:
-            logger.error(f"索引中没有分类数据")
-            sys.exit(1)
-            
-        # 生成查询向量
-        logger.info(f"查询: {args.query}")
-        generator = VectorGenerator(model_name=search_config.model_name, config=search_config)
-        query_vector = generator.generate_query_vector(args.query)
-        
         # 检查集合中是否有数据
         entity_count = storage.collection.num_entities if storage.collection else 0
         if entity_count == 0:
@@ -507,6 +518,11 @@ def search(args=None):
             print("请运行: python -m src.categoryvector.cli build --categories your_categories.json")
             sys.exit(1)
             
+        # 生成查询向量
+        logger.info(f"查询: {args.query}")
+        generator = VectorGenerator(model_name=search_config.model_name, config=search_config)
+        query_vector = generator.generate_query_vector(args.query)
+        
         # 执行搜索
         if args.level:
             # 按层级搜索
@@ -562,6 +578,8 @@ def search(args=None):
 
 def update_category(args=None):
     """更新特定分类的向量"""
+    start_time = time.time()
+    
     if args is None:
         args = parse_update_args()
     
@@ -569,30 +587,29 @@ def update_category(args=None):
     config = CategoryVectorConfig.from_toml(args.config if hasattr(args, 'config') else None)
     
     # 处理详细日志模式
-    if args.verbose:
+    if hasattr(args, 'verbose') and args.verbose:
         args.log_level = "DEBUG"
         
     # 命令行参数覆盖配置文件
     log_level = args.log_level or config.log_level
+    model_name = args.model or config.model_name
+    vector_dim = args.vector_dim or config.vector_dim
+    milvus_host = args.milvus_host or config.milvus_host
+    milvus_port = args.milvus_port or config.milvus_port
+    collection_name = args.collection_name or config.collection_name
     
     # 设置日志
     logger = setup_logger("categoryvector", level=log_level)
     
-    logger.info(f"开始更新分类ID={args.category_id}的向量...")
+    print(f"开始更新分类ID={args.category_id}的向量...")
+    print(f"- 索引目录: {args.index}")
+    print(f"- 分类ID: {args.category_id}")
+    print(f"- 向量维度: {vector_dim}")
+    print(f"- 模型: {model_name}")
+    print(f"- Milvus配置: 主机={milvus_host}, 端口={milvus_port}, 集合={collection_name}")
     
     try:
-        # 参数覆盖配置
-        model_name = args.model or config.model_name
-        vector_dim = args.vector_dim or config.vector_dim
-        milvus_host = args.milvus_host or config.milvus_host
-        milvus_port = args.milvus_port or config.milvus_port
-        collection_name = args.collection_name or config.collection_name
-        
-        logger.info(f"参数信息: 索引目录={args.index}, 分类ID={args.category_id}, 向量维度={vector_dim}, 模型={model_name}")
-        logger.info(f"Milvus配置: 主机={milvus_host}, 端口={milvus_port}, 集合={collection_name}")
-        
         # 创建配置
-        logger.info(f"正在创建配置...")
         update_config = CategoryVectorConfig(
             model_name=model_name,
             data_dir=Path(args.index),
@@ -604,50 +621,62 @@ def update_category(args=None):
             top_k=config.top_k,
             similarity_threshold=config.similarity_threshold,
             nlist=config.nlist,
-            m_factor=config.m_factor
+            m_factor=config.m_factor,
+            index_type=config.index_type
         )
         
-        # 创建存储实例并检查 Milvus 连通性
-        logger.info("检查 Milvus 服务器连通性...")
-        storage = VectorStorage(dimension=vector_dim, config=update_config)
+        # 尝试连接 Milvus
         try:
-            storage.connect_to_milvus()
-        except ConnectionError as e:
-            logger.error(f"Milvus 服务器连接失败: {e}")
-            logger.error("请检查 Milvus 服务器是否正在运行，以及网络连接是否正常")
-            sys.exit(1)
+            print(f"正在连接 Milvus 服务器: {milvus_host}:{milvus_port}...")
+            try:
+                # 断开可能存在的连接
+                connections.disconnect("default")
+            except:
+                pass
+                
+            # 尝试建立连接
+            connections.connect("default", host=milvus_host, port=milvus_port)
+            print(f"✓ Milvus 连接成功")
+        except Exception as e:
+            print(f"✗ Milvus 连接失败: {milvus_host}:{milvus_port}, 错误: {e}")
+            print("请检查 Milvus 服务器是否正在运行")
+            return
             
+        # 创建存储实例
+        storage = VectorStorage(dimension=vector_dim, config=update_config)
+        
         # 加载索引目录
         index_path = Path(args.index)
         if not index_path.exists():
-            logger.error(f"索引目录不存在: {index_path}")
-            sys.exit(1)
+            print(f"错误: 索引目录不存在: {index_path}")
+            return
             
         # 加载现有类别数据
+        print(f"正在加载索引数据...")
         try:
             storage.load(index_path)
         except Exception as e:
-            logger.error(f"加载索引数据失败: {e}")
-            sys.exit(1)
+            print(f"✗ 加载索引数据失败: {e}")
+            return
             
         if not storage.categories:
-            logger.error("索引中没有分类数据")
-            sys.exit(1)
+            print("✗ 索引中没有分类数据")
+            return
             
         # 查找要更新的分类
         category_id = args.category_id
         if category_id not in storage.categories:
-            logger.error(f"未找到分类ID={category_id}，无法更新")
-            sys.exit(1)
+            print(f"✗ 未找到分类ID={category_id}，无法更新")
+            return
             
         category = storage.categories[category_id]
-        logger.info(f"找到分类: ID={category.id}, 路径={category.path}")
+        print(f"✓ 找到分类: ID={category.id}, 路径={category.path}")
         
         # 重新生成向量
-        logger.info(f"加载模型: {update_config.model_name}")
+        print(f"\n正在加载模型: {update_config.model_name}...")
         generator = VectorGenerator(model_name=update_config.model_name, config=update_config)
         
-        logger.info(f"为分类ID={category.id}重新生成向量...")
+        print(f"\n为分类ID={category.id}重新生成向量...")
         try:
             # 先清除旧向量
             category.vector = None
@@ -655,27 +684,60 @@ def update_category(args=None):
             
             # 生成新向量
             updated_category = generator.enrich_category_vectors(category)
-            logger.info(f"分类ID={category.id}的向量生成成功")
+            print(f"✓ 分类ID={category.id}的向量生成成功")
             
             # 更新到Milvus
-            logger.info(f"更新Milvus中的分类向量...")
+            print(f"\n正在更新 Milvus 中的分类向量...")
             storage.add_category(updated_category)
-            logger.info(f"Milvus向量更新成功")
+            print(f"✓ Milvus 向量更新成功")
             
             # 保存更新后的数据
-            logger.info(f"保存更新后的索引数据...")
+            print(f"\n正在保存到索引目录: {index_path}...")
             storage.save(index_path)
-            logger.info(f"索引数据保存完成")
+            print(f"✓ 索引数据保存完成")
             
-            logger.info(f"分类ID={category.id}的向量已成功更新")
+            # 更新 Redis
+            print("\n正在更新 Redis...")
+            redis_key = f"categories:{category_id}"
+            try:
+                # 检查 Redis 客户端是否可用
+                if redis_client.client is not None:
+                    # 将分类对象转换为字典
+                    category_dict = {
+                        "id": updated_category.id,
+                        "path": updated_category.path,
+                        "levels": updated_category.levels,
+                        "level_depth": updated_category.level_depth,
+                        "description": updated_category.description,
+                        "keywords": updated_category.keywords,
+                        "examples": updated_category.examples,
+                        "exclusions": updated_category.exclusions,
+                        "vector": updated_category.vector.tolist() if hasattr(updated_category, 'vector') and updated_category.vector is not None else None,
+                        "level_vectors": {
+                            k: v.tolist() for k, v in updated_category.level_vectors.items()
+                        } if updated_category.level_vectors else {}
+                    }
+                    redis_client.set(redis_key, category_dict, 60*60*24*30)
+                    print("✓ Redis 更新成功")
+                else:
+                    print("✗ Redis 连接不可用，无法更新")
+            except Exception as e:
+                print(f"✗ Redis 更新失败: {e}")
+            
+            total_time = time.time() - start_time
+            print(f"\n更新完成:")
+            print(f"- 分类ID: {category.id}")
+            print(f"- 分类路径: {category.path}")
+            print(f"- 向量维度: {vector_dim}")
+            print(f"- 总耗时: {total_time:.2f}秒")
             
         except Exception as e:
-            logger.error(f"更新分类向量时出错: {e}")
-            sys.exit(1)
+            print(f"✗ 更新分类向量时出错: {e}")
+            return
     
     except Exception as e:
-        logger.exception(f"更新分类时发生错误: {e}")
-        sys.exit(1)
+        print(f"✗ 更新分类时发生错误: {e}")
+        return
 
 
 def main():
@@ -795,15 +857,15 @@ def main():
             "--top-k",
             "-k",
             type=int,
-            default=5,
-            help="返回结果数量"
+            default=None,
+            help="返回结果数量，默认使用配置文件中的设置"
         )
         search_parser.add_argument(
             "--threshold",
             "-t",
             type=float,
-            default=0.3,
-            help="相似度阈值 (使用余弦相似度，范围0-1)"
+            default=None,
+            help="相似度阈值，默认使用配置文件中的设置"
         )
         search_parser.add_argument(
             "--level",
@@ -896,7 +958,36 @@ def main():
         
         try:
             if args.command == "build":
-                build_index(args)
+                # 加载配置文件
+                config = CategoryVectorConfig.from_toml(args.config if hasattr(args, 'config') else None)
+                
+                # 处理详细日志模式
+                if args.verbose:
+                    args.log_level = "DEBUG"
+                    
+                # 命令行参数覆盖配置文件
+                log_level = args.log_level or config.log_level
+                
+                # 创建配置
+                build_config = CategoryVectorConfig(
+                    model_name=args.model or config.model_name,
+                    data_dir=Path(args.categories).parent,
+                    log_level=log_level,
+                    vector_dim=args.vector_dim or config.vector_dim,
+                    # 添加Milvus配置参数
+                    milvus_host=args.milvus_host or config.milvus_host,
+                    milvus_port=args.milvus_port or config.milvus_port,
+                    collection_name=args.collection_name or config.collection_name,
+                    index_type=args.index_type or config.index_type,
+                    # 添加其他配置参数
+                    output_dir=args.output or (config.output_dir if config.output_dir else "data/vectors"),
+                    top_k=config.top_k,
+                    similarity_threshold=config.similarity_threshold,
+                    nlist=config.nlist,
+                    m_factor=config.m_factor
+                )
+                
+                build_index(args.categories, args.output, build_config)
             elif args.command == "search":
                 search(args)
             elif args.command == "update":

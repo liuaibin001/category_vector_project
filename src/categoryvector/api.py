@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 import numpy as np
 import os
 from pathlib import Path
+import time
+from pymilvus import connections
 
 try:
     from src.categoryvector.cli import search as cli_search, update_category as cli_update_category
@@ -29,11 +31,11 @@ app = FastAPI(
 # 定义模型
 class SearchRequest(BaseModel):
     query: str = Field(..., description="搜索关键词，必填")
-    top_k: Optional[int] = Field(5, description="返回结果数量")
-    threshold: Optional[float] = Field(0.3, description="相似度阈值 (0-1)")
+    top_k: Optional[int] = Field(15, description="返回结果数量")
+    threshold: Optional[float] = Field(0.1, description="相似度阈值 (0-1)")
     level: Optional[int] = Field(None, description="指定搜索层级")
-    index_dir: Optional[str] = Field("data/vectors", description="索引目录路径")
     verbose: Optional[bool] = Field(False, description="是否显示详细日志")
+    index_dir: Optional[str] = Field("data/vectors", description="索引目录路径")
 
 class UpdateRequest(BaseModel):
     category_id: int = Field(..., description="要更新的分类ID，必填")
@@ -64,11 +66,11 @@ class SearchArgs:
         self, 
         query: str,
         index: str = "data/vectors",
-        top_k: int = 5,
-        threshold: float = 0.3,
+        top_k: int = 15,
+        threshold: float = 0.1,
         level: Optional[int] = None,
         verbose: bool = False,
-        log_level: str = "INFO",
+        log_level: str = "ERROR",
         config: Optional[str] = None,
         milvus_host: Optional[str] = None,
         milvus_port: Optional[str] = None,
@@ -122,6 +124,10 @@ async def general_exception_handler(request, exc):
 # 创建搜索接口
 @app.post("/api/search", response_model=SearchResponse, summary="搜索分类", description="根据查询文本搜索相似分类")
 async def search_api(request: SearchRequest):
+    # 设置日志
+    log_level = "DEBUG" if request.verbose else "INFO"
+    logger = setup_logger("categoryvector", level=log_level)
+    
     try:
         # 构建CLI参数
         args = SearchArgs(
@@ -136,9 +142,14 @@ async def search_api(request: SearchRequest):
         # 加载配置
         config = CategoryVectorConfig.from_toml()
         
-        # 设置日志
-        log_level = "DEBUG" if request.verbose else "INFO"
-        logger = setup_logger("categoryvector", level=log_level)
+        # 命令行参数覆盖配置文件
+        top_k = args.top_k or config.top_k
+        threshold = args.threshold or config.similarity_threshold
+        milvus_host = args.milvus_host or config.milvus_host
+        milvus_port = args.milvus_port or config.milvus_port
+        collection_name = args.collection_name or config.collection_name
+        
+        logger.info(f"开始搜索过程...")
         
         # 检查索引目录
         index_path = Path(args.index)
@@ -150,57 +161,60 @@ async def search_api(request: SearchRequest):
             model_name=config.model_name,
             data_dir=index_path,
             log_level=log_level,
-            milvus_host=args.milvus_host or config.milvus_host,
-            milvus_port=args.milvus_port or config.milvus_port,
-            collection_name=args.collection_name or config.collection_name,
-            top_k=args.top_k,
-            similarity_threshold=args.threshold
+            # 添加Milvus配置
+            milvus_host=milvus_host,
+            milvus_port=milvus_port,
+            collection_name=collection_name,
+            top_k=top_k,
+            similarity_threshold=threshold
         )
         
-        # 创建存储实例并连接Milvus
+        # 创建存储实例并检查 Milvus 连通性
+        logger.info("检查 Milvus 服务器连通性...")
         storage = VectorStorage(config.vector_dim, search_config)
         try:
             storage.connect_to_milvus()
         except ConnectionError as e:
+            logger.error(f"Milvus 服务器连接失败: {e}")
             raise HTTPException(status_code=503, detail=f"Milvus服务器连接失败: {str(e)}")
         
-        # 加载索引
+        # 初始化Milvus集合
+        logger.info("初始化Milvus集合...")
         try:
-            storage.load(index_path)
+            storage.setup_collection()
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"加载索引失败: {str(e)}")
+            logger.error(f"初始化Milvus集合失败: {e}")
+            raise HTTPException(status_code=500, detail=f"初始化Milvus集合失败: {str(e)}")
             
-        if not storage.categories:
-            raise HTTPException(status_code=404, detail="索引中没有分类数据")
+        # 检查集合中是否有数据
+        entity_count = storage.collection.num_entities if storage.collection else 0
+        if entity_count == 0:
+            logger.error("Milvus集合中没有向量数据。请先运行build命令构建索引并确保数据成功保存到Milvus。")
+            raise HTTPException(
+                status_code=404, 
+                detail="Milvus集合中没有向量数据。请先运行build命令构建索引并确保数据成功保存到Milvus。"
+            )
             
         # 生成查询向量
         logger.info(f"查询: {args.query}")
         generator = VectorGenerator(model_name=search_config.model_name, config=search_config)
         query_vector = generator.generate_query_vector(args.query)
         
-        # 检查集合中是否有数据
-        entity_count = storage.collection.num_entities if storage.collection else 0
-        if entity_count == 0:
-            raise HTTPException(
-                status_code=404, 
-                detail="Milvus集合中没有向量数据。请先运行build命令构建索引并确保数据成功保存到Milvus。"
-            )
-            
         # 执行搜索
         if args.level:
             # 按层级搜索
             results = storage.search_by_level(
                 query_vector,
                 level=args.level,
-                top_k=args.top_k,
-                threshold=args.threshold
+                top_k=top_k,
+                threshold=threshold
             )
         else:
             # 全局搜索
             results = storage.search(
                 query_vector,
-                top_k=args.top_k,
-                threshold=args.threshold
+                top_k=top_k,
+                threshold=threshold
             )
         
         # 格式化结果
@@ -239,8 +253,8 @@ async def search_api_get(
     top_k: int = Query(5, description="返回结果数量"),
     threshold: float = Query(0.3, description="相似度阈值 (0-1)"),
     level: Optional[int] = Query(None, description="指定搜索层级"),
-    index_dir: str = Query("data/vectors", description="索引目录路径"),
-    verbose: bool = Query(False, description="是否显示详细日志")
+    verbose: bool = Query(False, description="是否显示详细日志"),
+    index_dir: str = Query("data/vectors", description="索引目录路径")
 ):
     # 创建请求对象
     request = SearchRequest(
@@ -248,8 +262,8 @@ async def search_api_get(
         top_k=top_k,
         threshold=threshold,
         level=level,
-        index_dir=index_dir,
-        verbose=verbose
+        verbose=verbose,
+        index_dir=index_dir
     )
     
     # 调用POST方法处理逻辑
@@ -258,6 +272,8 @@ async def search_api_get(
 # 创建更新接口
 @app.post("/api/update", response_model=UpdateResponse, summary="更新分类向量", description="更新指定ID的分类向量")
 async def update_api(request: UpdateRequest):
+    start_time = time.time()
+    
     try:
         # 构建CLI参数
         args = UpdateArgs(
@@ -273,14 +289,14 @@ async def update_api(request: UpdateRequest):
         log_level = "DEBUG" if request.verbose else "INFO"
         logger = setup_logger("categoryvector", level=log_level)
         
-        logger.info(f"开始更新分类ID={args.category_id}的向量...")
-        
         # 参数覆盖配置
         model_name = args.model or config.model_name
         vector_dim = args.vector_dim or config.vector_dim
         milvus_host = args.milvus_host or config.milvus_host
         milvus_port = args.milvus_port or config.milvus_port
         collection_name = args.collection_name or config.collection_name
+        
+        logger.info(f"开始更新分类ID={args.category_id}的向量...")
         
         # 创建配置
         update_config = CategoryVectorConfig(
@@ -294,40 +310,58 @@ async def update_api(request: UpdateRequest):
             top_k=config.top_k,
             similarity_threshold=config.similarity_threshold,
             nlist=config.nlist,
-            m_factor=config.m_factor
+            m_factor=config.m_factor,
+            index_type=config.index_type
         )
         
-        # 创建存储实例并连接Milvus
-        storage = VectorStorage(dimension=vector_dim, config=update_config)
+        # 尝试连接 Milvus
         try:
-            storage.connect_to_milvus()
-        except ConnectionError as e:
+            logger.info(f"正在连接 Milvus 服务器: {milvus_host}:{milvus_port}...")
+            try:
+                # 断开可能存在的连接
+                connections.disconnect("default")
+            except:
+                pass
+                
+            # 尝试建立连接
+            connections.connect("default", host=milvus_host, port=milvus_port)
+            logger.info(f"✓ Milvus 连接成功")
+        except Exception as e:
+            logger.error(f"✗ Milvus 连接失败: {milvus_host}:{milvus_port}, 错误: {e}")
             raise HTTPException(status_code=503, detail=f"Milvus服务器连接失败: {str(e)}")
+            
+        # 创建存储实例
+        storage = VectorStorage(dimension=vector_dim, config=update_config)
             
         # 加载索引目录
         index_path = Path(args.index)
         if not index_path.exists():
+            logger.error(f"索引目录不存在: {index_path}")
             raise HTTPException(status_code=404, detail=f"索引目录不存在: {index_path}")
             
         # 加载现有类别数据
+        logger.info(f"正在加载索引数据...")
         try:
             storage.load(index_path)
         except Exception as e:
+            logger.error(f"✗ 加载索引数据失败: {e}")
             raise HTTPException(status_code=500, detail=f"加载索引数据失败: {str(e)}")
             
         if not storage.categories:
+            logger.error("✗ 索引中没有分类数据")
             raise HTTPException(status_code=404, detail="索引中没有分类数据")
             
         # 查找要更新的分类
         category_id = args.category_id
         if category_id not in storage.categories:
+            logger.error(f"✗ 未找到分类ID={category_id}，无法更新")
             raise HTTPException(status_code=404, detail=f"未找到分类ID={category_id}，无法更新")
             
         category = storage.categories[category_id]
-        logger.info(f"找到分类: ID={category.id}, 路径={category.path}")
+        logger.info(f"✓ 找到分类: ID={category.id}, 路径={category.path}")
         
         # 重新生成向量
-        logger.info(f"加载模型: {update_config.model_name}")
+        logger.info(f"正在加载模型: {update_config.model_name}...")
         generator = VectorGenerator(model_name=update_config.model_name, config=update_config)
         
         logger.info(f"为分类ID={category.id}重新生成向量...")
@@ -338,29 +372,77 @@ async def update_api(request: UpdateRequest):
             
             # 生成新向量
             updated_category = generator.enrich_category_vectors(category)
-            logger.info(f"分类ID={category.id}的向量生成成功")
+            logger.info(f"✓ 分类ID={category.id}的向量生成成功")
             
             # 更新到Milvus
-            logger.info(f"更新Milvus中的分类向量...")
+            logger.info(f"正在更新 Milvus 中的分类向量...")
             storage.add_category(updated_category)
-            logger.info(f"Milvus向量更新成功")
+            logger.info(f"✓ Milvus 向量更新成功")
             
             # 保存更新后的数据
-            logger.info(f"保存更新后的索引数据...")
+            logger.info(f"正在保存到索引目录: {index_path}...")
             storage.save(index_path)
-            logger.info(f"索引数据保存完成")
+            logger.info(f"✓ 索引数据保存完成")
             
-            logger.info(f"分类ID={category.id}的向量已成功更新")
+            # 更新 Redis
+            logger.info(f"正在更新 Redis...")
+            from categoryvector.utils.redis_client import redis_client
+            redis_key = f"categories:{category_id}"
+            redis_updated = False
+            redis_message = ""
+            
+            try:
+                # 检查 Redis 客户端是否可用
+                if redis_client.client is not None:
+                    # 将分类对象转换为字典
+                    category_dict = {
+                        "id": updated_category.id,
+                        "path": updated_category.path,
+                        "levels": updated_category.levels,
+                        "level_depth": updated_category.level_depth,
+                        "description": updated_category.description,
+                        "keywords": updated_category.keywords,
+                        "examples": updated_category.examples,
+                        "exclusions": updated_category.exclusions,
+                        "vector": updated_category.vector.tolist() if hasattr(updated_category, 'vector') and updated_category.vector is not None else None,
+                        "level_vectors": {
+                            k: v.tolist() for k, v in updated_category.level_vectors.items()
+                        } if updated_category.level_vectors else {}
+                    }
+                    redis_client.set(redis_key, category_dict, 60*60*24*30)
+                    logger.info(f"✓ Redis 更新成功")
+                    redis_updated = True
+                    redis_message = "Redis更新成功"
+                else:
+                    logger.warning(f"✗ Redis 连接不可用，无法更新")
+                    redis_message = "Redis连接不可用，无法更新"
+            except Exception as e:
+                logger.error(f"✗ Redis 更新失败: {e}")
+                redis_message = f"Redis更新失败: {str(e)}"
+            
+            total_time = time.time() - start_time
+            
+            # 构建详细响应信息
+            response_message = (
+                f"分类ID={category_id}的向量已成功更新。"
+                f"路径: {category.path}，"
+                f"向量维度: {vector_dim}"
+            )
+            
+            if redis_message:
+                response_message += f"，{redis_message}"
+                
+            response_message += f"，总耗时: {total_time:.2f}秒"
             
             # 返回结果
             return UpdateResponse(
                 category_id=category_id,
                 status="success",
-                message=f"分类ID={category_id}的向量已成功更新"
+                message=response_message
             )
             
         except Exception as e:
-            logger.error(f"更新分类向量时出错: {e}")
+            logger.error(f"✗ 更新分类向量时出错: {e}")
             raise HTTPException(status_code=500, detail=f"更新分类向量时出错: {str(e)}")
     
     except HTTPException as e:

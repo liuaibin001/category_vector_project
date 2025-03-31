@@ -14,7 +14,6 @@ from categoryvector.config import CategoryVectorConfig
 from categoryvector.data_processing import CategoryNode, CategoryProcessor
 from categoryvector.utils.logging_utils import default_logger as logger
 from .models import Category
-from categoryvector.vector_storage import VectorStorage
 
 
 class VectorGenerator:
@@ -28,12 +27,12 @@ class VectorGenerator:
             config: 配置对象，可选
         """
         self.config = config
-        logger.info(f"开始加载Sentence Transformer模型: {model_name}")
+        print(f"正在加载模型: {model_name}...")
         start_time = time.time()
         self.model = SentenceTransformer(model_name)
         load_time = time.time() - start_time
-        logger.info(f"模型加载完成，耗时: {load_time:.2f}秒")
-        logger.info(f"模型向量维度: {self.model.get_sentence_embedding_dimension()}")
+        model_dim = self.model.get_sentence_embedding_dimension()
+        print(f"✓ 模型加载完成 (维度: {model_dim}, 耗时: {load_time:.2f}秒)")
         
     def generate_category_vector(self, category: Category) -> np.ndarray:
         """生成分类的完整向量表示
@@ -247,13 +246,14 @@ class VectorGenerator:
         start_time = time.time()
         total_count = len(categories)
         
-        logger.info(f"开始使用{max_workers}个并行工作线程为{total_count}个类别批量生成向量...")
+        print(f"使用 {max_workers} 个并行线程处理 {total_count} 个类别...")
         
         # 使用线程池执行并行处理
         enriched_categories = []
+        errors = 0
         
         # 创建一个进度条
-        with tqdm(total=total_count, desc="生成向量", unit="类别") as pbar:
+        with tqdm(total=total_count, desc="生成向量", unit="类别", colour="green", dynamic_ncols=True) as pbar:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务
                 future_to_category = {
@@ -267,16 +267,19 @@ class VectorGenerator:
                     try:
                         enriched_category = future.result()
                         enriched_categories.append(enriched_category)
-                        # 更新进度条而不是打印日志
                         pbar.update(1)
                         pbar.set_postfix({"完成": f"{pbar.n/pbar.total*100:.1f}%"})
                     except Exception as e:
-                        logger.error(f"为分类 ID={original_category.id} 生成向量时出错: {e}")
-                        # 即使出错也更新进度条
+                        errors += 1
+                        pbar.set_description(f"❌ ID={original_category.id} 出错")
                         pbar.update(1)
                     
-        # 只在完成时输出一条日志
+        # 显示完成情况
         total_time = time.time() - start_time
-        logger.info(f"批量向量生成完成，耗时: {total_time:.2f}秒，平均每类耗时: {total_time/total_count:.4f}秒")
+        avg_time = total_time / total_count if total_count > 0 else 0
+        
+        print(f"✓ 向量生成完成: {len(enriched_categories)}/{total_count} 个类别 ({errors} 个错误)")
+        print(f"  - 总耗时: {total_time:.2f}秒")
+        print(f"  - 平均每类: {avg_time:.4f}秒")
         
         return enriched_categories

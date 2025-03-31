@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 
 from pydantic import BaseModel, Field, field_validator
+from categoryvector.utils.logging_utils import default_logger as logger
 
 
 class CategoryVectorConfig(BaseModel):
@@ -53,6 +54,44 @@ class CategoryVectorConfig(BaseModel):
         description="Milvus集合名称"
     )
     
+    # Redis配置
+    redis_host: str = Field(
+        default="localhost",
+        description="Redis服务器地址"
+    )
+    redis_port: int = Field(
+        default=6379,
+        description="Redis服务器端口"
+    )
+    redis_db: int = Field(
+        default=0,
+        description="Redis数据库编号"
+    )
+    redis_password: str = Field(
+        default="",
+        description="Redis密码"
+    )
+    redis_prefix: str = Field(
+        default="categoryvector:",
+        description="Redis键前缀"
+    )
+    redis_ttl: int = Field(
+        default=0,
+        description="Redis键过期时间（秒），0表示永不过期"
+    )
+    redis_socket_timeout: int = Field(
+        default=5,
+        description="Redis socket超时时间（秒）"
+    )
+    redis_socket_connect_timeout: int = Field(
+        default=5,
+        description="Redis socket连接超时时间（秒）"
+    )
+    redis_retry_on_timeout: bool = Field(
+        default=True,
+        description="Redis超时时是否重试"
+    )
+    
     # 搜索配置
     top_k: int = Field(
         default=5, 
@@ -80,99 +119,120 @@ class CategoryVectorConfig(BaseModel):
     # 数据目录配置
     output_dir: Optional[Path] = Field(
         default=None,
-        description="输出目录路径"
+        description="输出目录路径，None表示使用data_dir"
     )
     
     @field_validator('data_dir', 'log_file', 'output_dir', mode='before')
     @classmethod
     def validate_path(cls, v):
-        """验证并转换路径."""
-        if v is None:
-            return v
-        return Path(v) if not isinstance(v, Path) else v
+        """验证路径字段."""
+        if v is not None:
+            return Path(v)
+        return v
     
     @classmethod
     def from_toml(cls, file_path: Union[str, Path] = None) -> 'CategoryVectorConfig':
-        """从TOML文件加载配置
+        """从TOML文件加载配置.
         
         Args:
-            file_path: TOML配置文件路径，如果为None，则尝试从环境变量或默认位置读取
+            file_path: TOML文件路径，None表示使用默认路径
             
         Returns:
             CategoryVectorConfig实例
         """
-        # 尝试从环境变量获取配置文件路径
         if file_path is None:
-            file_path = os.environ.get("CATEGORYVECTOR_CONFIG")
-            
-        # 如果环境变量未设置，尝试从默认位置读取
-        if file_path is None:
-            # 检查项目根目录中的config.toml
-            default_paths = [
-                Path("./config.toml"),
-                Path("./configs/config.toml"),
-                Path.home() / ".config" / "categoryvector" / "config.toml"
-            ]
-            
-            for path in default_paths:
-                if path.exists():
-                    file_path = path
-                    break
+            file_path = Path("config.toml")
+        file_path = Path(file_path)
         
-        print(f"配置文件路径: {file_path}")
-                    
-        # 如果还是没找到配置文件，使用默认配置
-        if file_path is None or not Path(file_path).exists():
-            print("未找到配置文件，使用默认配置")
+        if not file_path.exists():
+            logger.warning(f"配置文件不存在: {file_path}，使用默认配置")
             return cls()
             
-        # 读取TOML文件
         try:
             config_data = toml.load(file_path)
             mapped_data = {}
             
             # 映射TOML节到配置字段
             if "milvus" in config_data:
-                # 正确地获取 host 和 port
-                mapped_data["milvus_host"] = config_data["milvus"].get("host")
-                mapped_data["milvus_port"] = config_data["milvus"].get("port")
-                mapped_data["collection_name"] = config_data["milvus"].get("collection_name")
-                print(f"从配置文件读取的 Milvus 配置: host={mapped_data['milvus_host']}, port={mapped_data['milvus_port']}")
+                milvus_config = config_data["milvus"]
+                mapped_data["milvus_host"] = milvus_config.get("host", "localhost")
+                mapped_data["milvus_port"] = str(milvus_config.get("port", "19530"))
+                mapped_data["collection_name"] = milvus_config.get("collection_name", "category_vectors")
+                logger.info(f"从配置文件读取的 Milvus 配置: host={mapped_data['milvus_host']}, port={mapped_data['milvus_port']}")
                 
             if "search" in config_data:
-                mapped_data["similarity_threshold"] = config_data["search"].get("threshold")
-                mapped_data["top_k"] = config_data["search"].get("top_k")
-                mapped_data["similarity_metric"] = config_data["search"].get("similarity_metric")
+                search_config = config_data["search"]
+                mapped_data["similarity_threshold"] = search_config.get("threshold", 0.6)
+                mapped_data["top_k"] = search_config.get("top_k", 5)
+                mapped_data["similarity_metric"] = search_config.get("similarity_metric", "IP")
                 
             if "index" in config_data:
-                mapped_data["index_type"] = config_data["index"].get("type")
-                mapped_data["nlist"] = config_data["index"].get("nlist")
-                mapped_data["m_factor"] = config_data["index"].get("m_factor")
+                index_config = config_data["index"]
+                mapped_data["index_type"] = index_config.get("type", "flat")
+                mapped_data["nlist"] = index_config.get("nlist", 100)
+                mapped_data["m_factor"] = index_config.get("m_factor", 16)
                 
             if "model" in config_data:
-                mapped_data["model_name"] = config_data["model"].get("name")
-                mapped_data["vector_dim"] = config_data["model"].get("vector_dim")
+                model_config = config_data["model"]
+                mapped_data["model_name"] = model_config.get("name", "all-MiniLM-L6-v2")
+                mapped_data["vector_dim"] = model_config.get("vector_dim", 384)
                 
             if "logging" in config_data:
-                mapped_data["log_level"] = config_data["logging"].get("level")
-                log_file = config_data["logging"].get("file")
+                logging_config = config_data["logging"]
+                mapped_data["log_level"] = logging_config.get("level", "INFO")
+                log_file = logging_config.get("file")
                 if log_file:
                     mapped_data["log_file"] = Path(log_file)
                     
             if "data" in config_data:
-                output_dir = config_data["data"].get("output_dir")
+                data_config = config_data["data"]
+                output_dir = data_config.get("output_dir")
                 if output_dir:
                     mapped_data["output_dir"] = Path(output_dir)
+                    
+            if "redis" in config_data:
+                redis_config = config_data["redis"]
+                mapped_data["redis_host"] = redis_config.get("host", "localhost")
+                mapped_data["redis_port"] = redis_config.get("port", 6379)
+                mapped_data["redis_db"] = redis_config.get("db", 0)
+                mapped_data["redis_password"] = redis_config.get("password", "")
+                mapped_data["redis_prefix"] = redis_config.get("prefix", "categoryvector:")
+                mapped_data["redis_ttl"] = redis_config.get("ttl", 0)
+                mapped_data["redis_socket_timeout"] = redis_config.get("socket_timeout", 5)
+                mapped_data["redis_socket_connect_timeout"] = redis_config.get("socket_connect_timeout", 5)
+                mapped_data["redis_retry_on_timeout"] = redis_config.get("retry_on_timeout", True)
             
-            # 创建配置实例，过滤掉None值
-            config_instance = cls(**{k: v for k, v in mapped_data.items() if v is not None})
-            print(f"最终配置: milvus_host={config_instance.milvus_host}, milvus_port={config_instance.milvus_port}")
+            # 创建配置实例
+            config_instance = cls(**mapped_data)
+            logger.info(f"最终配置: milvus_host={config_instance.milvus_host}, milvus_port={config_instance.milvus_port}")
             return config_instance
             
         except Exception as e:
-            print(f"读取配置文件失败: {e}")
+            logger.error(f"读取配置文件失败: {e}")
             return cls()
-    
+            
+    @classmethod
+    def get_redis_config(cls) -> Dict[str, Any]:
+        """获取Redis配置
+        
+        Returns:
+            Dict[str, Any]: Redis配置字典
+        """
+        # 从配置文件加载配置
+        config = cls.from_toml()
+        
+        return {
+            'host': config.redis_host,
+            'port': config.redis_port,
+            'db': config.redis_db,
+            'password': config.redis_password,
+            'prefix': config.redis_prefix,
+            'ttl': config.redis_ttl,
+            'socket_timeout': config.redis_socket_timeout,
+            'socket_connect_timeout': config.redis_socket_connect_timeout,
+            'retry_on_timeout': config.redis_retry_on_timeout
+        }
+
     class Config:
         """配置元数据."""
         
