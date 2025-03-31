@@ -1,3 +1,5 @@
+"""API服务入口点"""
+
 import os
 import sys
 import argparse
@@ -10,11 +12,11 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from categoryvector.api import app
+    from categoryvector import get_app
     from categoryvector.utils.logging_utils import setup_logger, default_logger as logger
 except ImportError:
-    from src.categoryvector.api import app
-    from src.categoryvector.utils.logging_utils import setup_logger, default_logger as logger
+    from . import get_app
+    from .utils.logging_utils import setup_logger, default_logger as logger
 
 def parse_args():
     """解析命令行参数"""
@@ -52,7 +54,7 @@ def parse_args():
 
 def main():
     """启动API服务"""
-    # 解析参数
+    # 解析命令行参数
     args = parse_args()
     
     # 设置日志
@@ -60,13 +62,16 @@ def main():
     logger.info(f"正在启动Category Vector API服务于 {args.host}:{args.port}...")
     
     try:
+        # 获取FastAPI应用实例
+        app = get_app()
+        
         # 启动服务
         if args.reload:
             logger.info("已启用热重载，这是开发模式")
             
         # 使用uvicorn启动FastAPI应用
         uvicorn.run(
-            "categoryvector.api:app",
+            app,
             host=args.host,
             port=args.port,
             reload=args.reload,

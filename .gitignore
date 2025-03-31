@@ -40,6 +40,5 @@ htmlcov/
 .mypy_cache/
 
 # Project specific
-data/vectors/
 *.log
 data/single_file/**

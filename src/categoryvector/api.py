@@ -1,3 +1,5 @@
+"""API模块"""
+
 from fastapi import FastAPI, HTTPException, Query, Path, Depends
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
@@ -7,19 +9,14 @@ import os
 from pathlib import Path
 import time
 from pymilvus import connections
+import uvicorn
 
-try:
-    from src.categoryvector.cli import search as cli_search, update_category as cli_update_category
-    from src.categoryvector.config import CategoryVectorConfig
-    from src.categoryvector.vector_generation import VectorGenerator
-    from src.categoryvector.vector_storage import VectorStorage
-    from src.categoryvector.utils.logging_utils import setup_logger, default_logger as logger
-except ImportError:
-    from .cli import search as cli_search, update_category as cli_update_category
-    from .config import CategoryVectorConfig
-    from .vector_generation import VectorGenerator
-    from .vector_storage import VectorStorage
-    from .utils.logging_utils import setup_logger, default_logger as logger
+from .cli import search as cli_search, update_category as cli_update_category
+from .config import CategoryVectorConfig
+from .models import Category
+from .vector_generation import VectorGenerator
+from .vector_storage import VectorStorage
+from .utils.logging_utils import setup_logger, default_logger as logger
 
 # 创建FastAPI应用
 app = FastAPI(

@@ -348,8 +348,8 @@ def build_index(categories_file: str, output_dir: Optional[str] = None, config: 
                             if utility.has_collection(collection_name):
                                 print(f"正在删除现有 Milvus 集合: {collection_name}...")
                                 utility.drop_collection(collection_name)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"删除集合时出错: {e}")
                               
                         # 批量添加到 Milvus
                         print("正在将类别添加到 Milvus...")
@@ -376,7 +376,6 @@ def build_index(categories_file: str, output_dir: Optional[str] = None, config: 
                         return
                     else:
                         print("✗ 没有找到有效的类别数据，将重新构建向量")
-                        
             except Exception as e:
                 print(f"✗ 加载现有向量数据时出错: {str(e)}")
                 print("将重新构建向量")
@@ -509,7 +508,7 @@ def search(args=None):
         except Exception as e:
             logger.error(f"初始化Milvus集合失败: {e}")
             sys.exit(1)
-            
+        
         # 检查集合中是否有数据
         entity_count = storage.collection.num_entities if storage.collection else 0
         if entity_count == 0:
@@ -522,7 +521,7 @@ def search(args=None):
         logger.info(f"查询: {args.query}")
         generator = VectorGenerator(model_name=search_config.model_name, config=search_config)
         query_vector = generator.generate_query_vector(args.query)
-        
+            
         # 执行搜索
         if args.level:
             # 按层级搜索
@@ -644,7 +643,7 @@ def update_category(args=None):
             
         # 创建存储实例
         storage = VectorStorage(dimension=vector_dim, config=update_config)
-        
+            
         # 加载索引目录
         index_path = Path(args.index)
         if not index_path.exists():
@@ -673,7 +672,6 @@ def update_category(args=None):
         print(f"✓ 找到分类: ID={category.id}, 路径={category.path}")
         
         # 重新生成向量
-        print(f"\n正在加载模型: {update_config.model_name}...")
         generator = VectorGenerator(model_name=update_config.model_name, config=update_config)
         
         print(f"\n为分类ID={category.id}重新生成向量...")
@@ -742,263 +740,250 @@ def update_category(args=None):
 
 def main():
     """主程序入口"""
-    # 确定当前运行的命令名称
-    program_name = Path(sys.argv[0]).name
+    # 作为主命令运行，需要解析子命令
+    parser = argparse.ArgumentParser(description="类别向量工具")
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="日志级别"
+    )
     
-    if program_name == "build":
-        # 直接作为构建命令运行
-        build_index()
-    elif program_name == "search":
-        # 直接作为搜索命令运行
-        search()
-    elif program_name == "update":
-        # 直接作为更新命令运行
-        update_category()
-    else:
-        # 作为主命令运行，需要解析子命令
-        parser = argparse.ArgumentParser(description="类别向量工具")
-        parser.add_argument(
-            "--log-level",
-            choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-            default="INFO",
-            help="日志级别"
-        )
-        
-        subparsers = parser.add_subparsers(dest="command", help="可用命令")
-        
-        # 构建索引子命令
-        build_parser = subparsers.add_parser("build", help="构建类别向量索引")
-        build_parser.add_argument(
-            "--categories",
-            "-c",
-            required=True,
-            help="类别数据JSON文件路径"
-        )
-        build_parser.add_argument(
-            "--output",
-            "-o",
-            required=False,
-            help="输出索引目录"
-        )
-        build_parser.add_argument(
-            "--vector-dim",
-            "-d",
-            type=int,
-            default=384,
-            help="向量维度"
-        )
-        build_parser.add_argument(
-            "--model",
-            "-m",
-            default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-            help="向量模型名称"
-        )
-        build_parser.add_argument(
-            "--verbose",
-            "-v",
-            action="store_true",
-            help="启用详细日志输出（自动设置日志级别为DEBUG）"
-        )
-        
-        # 添加并行处理参数到build子命令
-        build_parser.add_argument(
-            "--workers",
-            "-w",
-            type=int,
-            default=None,
-            help="并行处理的工作线程数，默认为CPU核心数*5"
-        )
-        build_parser.add_argument(
-            "--batch-size",
-            "-b",
-            type=int,
-            default=100,
-            help="批量插入Milvus的批次大小，默认为100"
-        )
-        
-        # 添加Milvus相关参数到build子命令
-        build_parser.add_argument(
-            "--milvus-host",
-            default=None,
-            help="Milvus服务器地址，默认使用配置文件中的设置"
-        )
-        build_parser.add_argument(
-            "--milvus-port",
-            default=None,
-            help="Milvus服务器端口，默认使用配置文件中的设置"
-        )
-        build_parser.add_argument(
-            "--collection-name",
-            default=None,
-            help="Milvus集合名称，默认使用配置文件中的设置"
-        )
-        build_parser.add_argument(
-            "--index-type",
-            choices=["flat", "ivf", "hnsw"],
-            default="flat",
-            help="索引类型: flat, ivf, hnsw"
-        )
-        
-        # 搜索子命令
-        search_parser = subparsers.add_parser("search", help="搜索类别")
-        search_parser.add_argument(
-            "--index",
-            "-i",
-            required=True,
-            help="索引目录路径"
-        )
-        search_parser.add_argument(
-            "--query",
-            "-q",
-            required=True,
-            help="搜索查询文本"
-        )
-        search_parser.add_argument(
-            "--top-k",
-            "-k",
-            type=int,
-            default=None,
-            help="返回结果数量，默认使用配置文件中的设置"
-        )
-        search_parser.add_argument(
-            "--threshold",
-            "-t",
-            type=float,
-            default=None,
-            help="相似度阈值，默认使用配置文件中的设置"
-        )
-        search_parser.add_argument(
-            "--level",
-            "-l",
-            type=int,
-            help="指定搜索层级"
-        )
-        
-        # 添加verbose参数
-        search_parser.add_argument(
-            "--verbose",
-            "-v",
-            action="store_true",
-            help="启用详细日志输出（自动设置日志级别为DEBUG）"
-        )
-        
-        # 添加Milvus相关参数到search子命令
-        search_parser.add_argument(
-            "--milvus-host",
-            default=None,
-            help="Milvus服务器地址，默认使用配置文件中的设置"
-        )
-        search_parser.add_argument(
-            "--milvus-port",
-            default=None,
-            help="Milvus服务器端口，默认使用配置文件中的设置"
-        )
-        search_parser.add_argument(
-            "--collection-name",
-            default=None,
-            help="Milvus集合名称，默认使用配置文件中的设置"
-        )
-        
-        # 更新子命令
-        update_parser = subparsers.add_parser("update", help="更新特定分类的向量")
-        update_parser.add_argument(
-            "--index",
-            "-i",
-            required=True,
-            help="索引目录路径"
-        )
-        update_parser.add_argument(
-            "--category-id",
-            "-c",
-            required=True,
-            type=int,
-            help="要更新的分类ID"
-        )
-        update_parser.add_argument(
-            "--vector-dim",
-            "-d",
-            type=int,
-            default=None,
-            help="向量维度，默认使用配置文件中的设置"
-        )
-        update_parser.add_argument(
-            "--model",
-            "-m",
-            default=None,
-            help="向量模型名称，默认使用配置文件中的设置"
-        )
-        update_parser.add_argument(
-            "--verbose",
-            "-v",
-            action="store_true",
-            help="启用详细日志输出（自动设置日志级别为DEBUG）"
-        )
-        
-        # 添加Milvus相关参数到update子命令
-        update_parser.add_argument(
-            "--milvus-host",
-            default=None,
-            help="Milvus服务器地址，默认使用配置文件中的设置"
-        )
-        update_parser.add_argument(
-            "--milvus-port",
-            default=None,
-            help="Milvus服务器端口，默认使用配置文件中的设置"
-        )
-        update_parser.add_argument(
-            "--collection-name",
-            default=None,
-            help="Milvus集合名称，默认使用配置文件中的设置"
-        )
-        
-        args = parser.parse_args()
-        
-        # 设置日志
-        logger = setup_logger("categoryvector", level=args.log_level)
-        
-        try:
-            if args.command == "build":
-                # 加载配置文件
-                config = CategoryVectorConfig.from_toml(args.config if hasattr(args, 'config') else None)
+    subparsers = parser.add_subparsers(dest="command", help="可用命令")
+    
+    # 构建索引子命令
+    build_parser = subparsers.add_parser("build", help="构建类别向量索引")
+    build_parser.add_argument(
+        "--categories",
+        "-c",
+        required=True,
+        help="类别数据JSON文件路径"
+    )
+    build_parser.add_argument(
+        "--output",
+        "-o",
+        required=False,
+        help="输出索引目录"
+    )
+    build_parser.add_argument(
+        "--vector-dim",
+        "-d",
+        type=int,
+        default=384,
+        help="向量维度"
+    )
+    build_parser.add_argument(
+        "--model",
+        "-m",
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        help="向量模型名称"
+    )
+    build_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="启用详细日志输出（自动设置日志级别为DEBUG）"
+    )
+    
+    # 添加并行处理参数到build子命令
+    build_parser.add_argument(
+        "--workers",
+        "-w",
+        type=int,
+        default=None,
+        help="并行处理的工作线程数，默认为CPU核心数*5"
+    )
+    build_parser.add_argument(
+        "--batch-size",
+        "-b",
+        type=int,
+        default=100,
+        help="批量插入Milvus的批次大小，默认为100"
+    )
+    
+    # 添加Milvus相关参数到build子命令
+    build_parser.add_argument(
+        "--milvus-host",
+        default=None,
+        help="Milvus服务器地址，默认使用配置文件中的设置"
+    )
+    build_parser.add_argument(
+        "--milvus-port",
+        default=None,
+        help="Milvus服务器端口，默认使用配置文件中的设置"
+    )
+    build_parser.add_argument(
+        "--collection-name",
+        default=None,
+        help="Milvus集合名称，默认使用配置文件中的设置"
+    )
+    build_parser.add_argument(
+        "--index-type",
+        choices=["flat", "ivf", "hnsw"],
+        default="flat",
+        help="索引类型: flat, ivf, hnsw"
+    )
+    
+    # 搜索子命令
+    search_parser = subparsers.add_parser("search", help="搜索类别")
+    search_parser.add_argument(
+        "--index",
+        "-i",
+        required=True,
+        help="索引目录路径"
+    )
+    search_parser.add_argument(
+        "--query",
+        "-q",
+        required=True,
+        help="搜索查询文本"
+    )
+    search_parser.add_argument(
+        "--top-k",
+        "-k",
+        type=int,
+        default=None,
+        help="返回结果数量，默认使用配置文件中的设置"
+    )
+    search_parser.add_argument(
+        "--threshold",
+        "-t",
+        type=float,
+        default=None,
+        help="相似度阈值，默认使用配置文件中的设置"
+    )
+    search_parser.add_argument(
+        "--level",
+        "-l",
+        type=int,
+        help="指定搜索层级"
+    )
+    
+    # 添加verbose参数
+    search_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="启用详细日志输出（自动设置日志级别为DEBUG）"
+    )
+    
+    # 添加Milvus相关参数到search子命令
+    search_parser.add_argument(
+        "--milvus-host",
+        default=None,
+        help="Milvus服务器地址，默认使用配置文件中的设置"
+    )
+    search_parser.add_argument(
+        "--milvus-port",
+        default=None,
+        help="Milvus服务器端口，默认使用配置文件中的设置"
+    )
+    search_parser.add_argument(
+        "--collection-name",
+        default=None,
+        help="Milvus集合名称，默认使用配置文件中的设置"
+    )
+    
+    # 更新子命令
+    update_parser = subparsers.add_parser("update", help="更新特定分类的向量")
+    update_parser.add_argument(
+        "--index",
+        "-i",
+        required=True,
+        help="索引目录路径"
+    )
+    update_parser.add_argument(
+        "--category-id",
+        "-c",
+        required=True,
+        type=int,
+        help="要更新的分类ID"
+    )
+    update_parser.add_argument(
+        "--vector-dim",
+        "-d",
+        type=int,
+        default=None,
+        help="向量维度，默认使用配置文件中的设置"
+    )
+    update_parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help="向量模型名称，默认使用配置文件中的设置"
+    )
+    update_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="启用详细日志输出（自动设置日志级别为DEBUG）"
+    )
+    
+    # 添加Milvus相关参数到update子命令
+    update_parser.add_argument(
+        "--milvus-host",
+        default=None,
+        help="Milvus服务器地址，默认使用配置文件中的设置"
+    )
+    update_parser.add_argument(
+        "--milvus-port",
+        default=None,
+        help="Milvus服务器端口，默认使用配置文件中的设置"
+    )
+    update_parser.add_argument(
+        "--collection-name",
+        default=None,
+        help="Milvus集合名称，默认使用配置文件中的设置"
+    )
+    
+    args = parser.parse_args()
+    
+    # 设置日志
+    logger = setup_logger("categoryvector", level=args.log_level)
+    
+    try:
+        if args.command == "build":
+            # 加载配置文件
+            config = CategoryVectorConfig.from_toml(args.config if hasattr(args, 'config') else None)
+            
+            # 处理详细日志模式
+            if args.verbose:
+                args.log_level = "DEBUG"
                 
-                # 处理详细日志模式
-                if args.verbose:
-                    args.log_level = "DEBUG"
-                    
-                # 命令行参数覆盖配置文件
-                log_level = args.log_level or config.log_level
-                
-                # 创建配置
-                build_config = CategoryVectorConfig(
-                    model_name=args.model or config.model_name,
-                    data_dir=Path(args.categories).parent,
-                    log_level=log_level,
-                    vector_dim=args.vector_dim or config.vector_dim,
-                    # 添加Milvus配置参数
-                    milvus_host=args.milvus_host or config.milvus_host,
-                    milvus_port=args.milvus_port or config.milvus_port,
-                    collection_name=args.collection_name or config.collection_name,
-                    index_type=args.index_type or config.index_type,
-                    # 添加其他配置参数
-                    output_dir=args.output or (config.output_dir if config.output_dir else "data/vectors"),
-                    top_k=config.top_k,
-                    similarity_threshold=config.similarity_threshold,
-                    nlist=config.nlist,
-                    m_factor=config.m_factor
-                )
-                
-                build_index(args.categories, args.output, build_config)
-            elif args.command == "search":
-                search(args)
-            elif args.command == "update":
-                update_category(args)
-            else:
-                logger.error("未指定命令。使用 --help 获取帮助。")
-                parser.print_help()
-                sys.exit(1)
-        except Exception as e:
-            logger.exception(f"执行时发生错误: {e}")
+            # 命令行参数覆盖配置文件
+            log_level = args.log_level or config.log_level
+            
+            # 创建配置
+            build_config = CategoryVectorConfig(
+                model_name=args.model or config.model_name,
+                data_dir=Path(args.categories).parent,
+                log_level=log_level,
+                vector_dim=args.vector_dim or config.vector_dim,
+                # 添加Milvus配置参数
+                milvus_host=args.milvus_host or config.milvus_host,
+                milvus_port=args.milvus_port or config.milvus_port,
+                collection_name=args.collection_name or config.collection_name,
+                index_type=args.index_type or config.index_type,
+                # 添加其他配置参数
+                output_dir=args.output or (config.output_dir if config.output_dir else "data/vectors"),
+                top_k=config.top_k,
+                similarity_threshold=config.similarity_threshold,
+                nlist=config.nlist,
+                m_factor=config.m_factor
+            )
+            
+            build_index(args.categories, args.output, build_config)
+        elif args.command == "search":
+            search(args)
+        elif args.command == "update":
+            update_category(args)
+        else:
+            logger.error("未指定命令。使用 --help 获取帮助。")
+            parser.print_help()
             sys.exit(1)
+    except Exception as e:
+        logger.exception(f"执行时发生错误: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

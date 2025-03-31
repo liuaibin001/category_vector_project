@@ -14,13 +14,11 @@
 使用Poetry安装:
 
 ```bash
+# 安装依赖
 poetry install
-```
 
-或直接通过pip安装:
-
-```bash
-pip install -e .
+# 激活虚拟环境
+poetry shell
 ```
 
 ## 配置
@@ -80,38 +78,46 @@ output_dir = "data/vectors"  # 默认输出目录
 ### 构建索引
 
 ```bash
-# 使用配置文件中的设置构建索引
-python -m src.categoryvector.cli build --categories data/valid_sample.json
-
-# 覆盖配置文件中的部分设置
-python -m src.categoryvector.cli build --categories data/valid_sample.json --output data/my_vectors --verbose
+poetry run cv --help  # 显示主命令帮助
+poetry run cv build --help  # 显示构建命令帮助
+poetry run cv search --help  # 显示搜索命令帮助
+poetry run cv update --help  # 显示更新命令帮助
 ```
-
-### 搜索
 
 ```bash
-# 使用配置文件中的设置进行搜索
-python -m src.categoryvector.cli search --index data/vectors --query "手机腰包"
+# 基本用法
+poetry run cv build --categories data/categories.json
 
-# 覆盖配置文件中的部分设置
-python -m src.categoryvector.cli search --index data/vectors --query "手机腰包" --top-k 5 --threshold 0.4 --verbose
+# 带参数的用法
+poetry run cv  build --categories data/valid_sample.json --output data/my_vectors --verbose
 ```
 
-### 指定配置文件
+### 搜索分类
 
 ```bash
-# 指定配置文件路径
-python -m src.categoryvector.cli build --config my_config.toml --categories data/valid_sample.json
+# 基本搜索
+poetry run cv search --index data/vectors --query "手机腰包"
+
+# 带参数的搜索
+poetry run cv search --index data/vectors --query "手机腰包" --top-k 5 --threshold 0.4
 ```
 
-###  更新指定ID的分类
+### 更新分类
 
 ```bash
-# 指定配置文件路径
-python -m src.categoryvector.cli update --index data/vectors --category-id 1001
+# 更新指定ID的分类
+poetry run cv update --index data/vectors --category-id 2001738
 ```
 
+### 启动API服务
 
+```bash
+# 基本启动
+poetry run serve
+
+# 开发模式（带热重载）
+poetry run serve --reload --port 8080
+```
 
 ## 向量搜索优化
 
@@ -121,9 +127,6 @@ python -m src.categoryvector.cli update --index data/vectors --category-id 1001
 2. **强化核心产品类型权重**：核心产品类型词在向量生成时获得更高权重，提高匹配精度
 3. **降低默认相似度阈值**：阈值从0.6调整为0.3，允许更宽泛的匹配结果
 4. **查询词加权处理**：对查询中的关键产品词进行加权，提高查找相关产品的准确性
-
-
-
 
 # Category Vector API
 

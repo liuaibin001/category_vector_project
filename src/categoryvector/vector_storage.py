@@ -174,9 +174,16 @@ class VectorStorage:
                         pk_to_delete = [r["pk"] for r in result]
                         # 删除现有记录
                         self.collection.delete(f"pk in {pk_to_delete}")
-                        logger.debug(f"已删除分类 ID={category_id} 的现有记录")
+                        # 强制执行刷新，确保删除生效
+                        self.collection.flush()
+                        # 验证删除是否成功
+                        verify_result = self.collection.query(expr=expr, output_fields=["pk"])
+                        if not verify_result:
+                            logger.debug(f"已成功删除分类 ID={category_id} 的现有记录")
+                        else:
+                            logger.warning(f"分类 ID={category_id} 的记录可能未完全删除")
                 except Exception as e:
-                    logger.warning(f"检查分类 ID={category_id} 是否存在时出错: {e}")
+                    logger.warning(f"检查或删除分类 ID={category_id} 时出错: {e}")
             
             # 标准化向量以准备余弦相似度计算
             vector = category.vector.astype('float32')
