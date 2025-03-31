@@ -15,6 +15,7 @@ from pymilvus import (
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union, Any
+from tqdm import tqdm
 
 from categoryvector.config import CategoryVectorConfig
 from categoryvector.data_processing import CategoryNode, CategoryProcessor
@@ -36,9 +37,6 @@ class VectorStorage:
         self.config = config
         self.categories: Dict[int, Category] = {}
         
-        # 连接到Milvus服务器
-        self.connect_to_milvus()
-        
         # 设置集合名称
         self.collection_name = "category_vectors"
         if self.config and hasattr(self.config, "collection_name"):
@@ -47,24 +45,42 @@ class VectorStorage:
         # 初始化集合
         self.collection = None
         
-    def connect_to_milvus(self):
-        """连接到Milvus服务器"""
-        host = "localhost"
-        port = "19530"
+    def check_milvus_connection(self, host: str, port: str) -> bool:
+        """检查 Milvus 服务器连通性
         
-        if self.config:
-            if hasattr(self.config, "milvus_host"):
-                host = self.config.milvus_host
-            if hasattr(self.config, "milvus_port"):
-                port = self.config.milvus_port
-        
-        logger.info(f"连接到Milvus服务器: {host}:{port}")
+        Args:
+            host: Milvus 服务器地址
+            port: Milvus 服务器端口
+            
+        Returns:
+            bool: 是否连接成功
+        """
         try:
+            # 如果已有连接，先断开
+            try:
+                connections.disconnect("default")
+            except:
+                pass
+                
+            # 尝试建立连接
             connections.connect("default", host=host, port=port)
             logger.info(f"Milvus连接成功: {host}:{port}")
+            return True
         except Exception as e:
-            logger.error(f"连接Milvus服务器失败: {host}:{port}, 错误: {e}")
-            raise
+            logger.error(f"Milvus连接失败: {host}:{port}, 错误: {e}")
+            return False
+            
+    def connect_to_milvus(self):
+        """连接到Milvus服务器"""
+        # 从配置中获取连接信息
+        host = self.config.milvus_host if self.config and hasattr(self.config, "milvus_host") else "localhost"
+        port = self.config.milvus_port if self.config and hasattr(self.config, "milvus_port") else "19530"
+        
+        logger.info(f"尝试连接到Milvus服务器: {host}:{port}")
+        
+        # 检查连接
+        if not self.check_milvus_connection(host, port):
+            raise ConnectionError(f"无法连接到Milvus服务器: {host}:{port}")
         
     def setup_collection(self):
         """创建或获取Milvus集合"""
@@ -87,9 +103,9 @@ class VectorStorage:
             # 创建集合
             self.collection = Collection(name=self.collection_name, schema=schema)
             
-            # 创建索引
+            # 创建索引 - 修改为余弦相似度(IP)
             index_params = {
-                "metric_type": "L2",
+                "metric_type": "IP",  # 使用IP (Inner Product)，用于余弦相似度
                 "index_type": "FLAT"  # 默认使用FLAT索引
             }
             
@@ -108,13 +124,23 @@ class VectorStorage:
                 logger.info(f"成功创建索引: {index_params}")
             except Exception as e:
                 logger.error(f"创建索引失败: {e}")
+                raise  # 确保索引创建失败时抛出异常
         
-        # 加载集合到内存
-        try:
-            self.collection.load()
-            logger.info(f"集合 {self.collection_name} 加载到内存成功，实体数: {self.collection.num_entities}")
-        except Exception as e:
-            logger.error(f"加载集合失败: {e}")
+        # 确保集合存在并有索引后，再加载到内存
+        if self.collection:
+            try:
+                self.collection.load()
+                # 验证集合是否已成功加载
+                entities_count = self.collection.num_entities
+                logger.info(f"集合 {self.collection_name} 加载到内存成功，实体数: {entities_count}")
+                
+                # 如果发现集合为空但categories中有数据，发出警告
+                if entities_count == 0 and len(self.categories) > 0:
+                    logger.warning(f"集合 {self.collection_name} 加载成功，但不包含向量。将无法执行搜索操作。")
+                    logger.warning("请确保成功执行build命令并向集合中添加了数据。")
+            except Exception as e:
+                logger.error(f"加载集合失败: {e}")
+                raise  # 确保加载失败时抛出异常
         
     def add_category(self, category: Category):
         """添加分类到索引
@@ -154,11 +180,45 @@ class VectorStorage:
                 except Exception as e:
                     logger.warning(f"检查分类 ID={category_id} 是否存在时出错: {e}")
             
-            # 插入到Milvus - 修正插入格式
-            self.collection.insert([
+            # 标准化向量以准备余弦相似度计算
+            vector = category.vector.astype('float32')
+            norm = np.linalg.norm(vector)
+            if norm > 0:
+                normalized_vector = vector / norm
+            else:
+                normalized_vector = vector
+                
+            # 检查向量维度是否正确
+            if len(normalized_vector) != self.dimension:
+                logger.error(f"向量维度不匹配：分类 ID={category_id} 的向量维度为 {len(normalized_vector)}，但集合需要 {self.dimension}")
+                raise ValueError(f"Vector dimension mismatch: {len(normalized_vector)} vs {self.dimension}")
+                
+            # 插入到Milvus - 使用归一化的向量
+            logger.info(f"正在将分类 ID={category_id} 插入Milvus，向量维度={len(normalized_vector)}")
+            insert_result = self.collection.insert([
                 {"category_id": category_id, 
-                 "vector": category.vector.astype('float32').tolist()}
+                 "vector": normalized_vector.tolist()}
             ])
+            
+            # 验证插入是否成功
+            if hasattr(insert_result, 'insert_count') and insert_result.insert_count > 0:
+                logger.info(f"成功插入分类 ID={category_id}，插入数量: {insert_result.insert_count}")
+            else:
+                logger.warning(f"插入分类 ID={category_id} 后没有收到确认，可能未成功")
+            
+            # 强制执行刷新，确保数据被保存
+            try:
+                self.collection.flush()
+                logger.debug(f"成功刷新集合，确保数据持久化")
+            except Exception as e:
+                logger.warning(f"刷新集合时出错: {e}")
+            
+            # 验证插入后的实体数
+            try:
+                entity_count = self.collection.num_entities
+                logger.info(f"当前集合实体数: {entity_count}")
+            except Exception as e:
+                logger.warning(f"获取集合实体数时出错: {e}")
             
             # 保存分类对象
             self.categories[category.id] = category
@@ -194,20 +254,39 @@ class VectorStorage:
             
         # 获取集合中实体数量
         entity_count = self.collection.num_entities
+        logger.info(f"开始搜索，集合包含 {entity_count} 个向量，分类数量 {len(self.categories)}")
         print(f"开始搜索，集合包含 {entity_count} 个向量，分类数量 {len(self.categories)}")
         print(f"请求返回 {top_k} 个结果，相似度阈值 {threshold}")
         
+        # 实体数为0时给出明确错误
+        if entity_count == 0:
+            logger.error("集合中没有向量数据，无法执行搜索。请先运行build命令添加数据。")
+            return []
+            
         # 确保查询向量是正确的形状和类型
         if query_vector.ndim == 1:
             query_vector = query_vector.reshape(-1)
         query_vector = query_vector.astype('float32')
         
-        # 如果集合为空，直接返回空结果
-        if entity_count == 0:
-            return []
+        # 标准化查询向量用于余弦相似度
+        norm = np.linalg.norm(query_vector)
+        if norm > 0:
+            query_vector = query_vector / norm
+            
+        # 默认使用IP作为搜索参数（余弦相似度）
+        search_params = {"metric_type": "IP"}
+        logger.info(f"搜索使用度量类型: IP (余弦相似度)")
         
-        # 设置搜索参数
-        search_params = {"metric_type": "L2"}
+        # 尝试查看索引信息
+        try:
+            index_dict = self.collection.index()
+            if index_dict and "_index_params" in dir(index_dict) and "params" in index_dict._index_params:
+                metric_type = index_dict._index_params["params"].get("metric_type")
+                if metric_type:
+                    search_params["metric_type"] = metric_type
+                    logger.info(f"使用索引度量类型: {metric_type}")
+        except Exception as e:
+            logger.debug(f"无法获取详细索引信息: {e}, 使用默认IP度量")
         
         # 根据配置调整搜索参数
         if self.config and self.config.index_type:
@@ -220,6 +299,8 @@ class VectorStorage:
         fetch_k = min(top_k * 3, entity_count)
         
         try:
+            logger.debug(f"执行搜索，参数: fetch_k={fetch_k}, 搜索参数={search_params}")
+            # 首先尝试IP搜索
             results = self.collection.search(
                 data=[query_vector.tolist()],
                 anns_field="vector",
@@ -227,20 +308,41 @@ class VectorStorage:
                 limit=fetch_k,
                 output_fields=["category_id"]
             )
+            logger.debug(f"搜索完成，获取到 {len(results[0])} 个初始结果")
         except Exception as e:
-            logger.error(f"Milvus搜索失败: {e}")
-            return []
+            logger.error(f"IP搜索失败: {e}")
+            # 如果IP失败，尝试L2
+            try:
+                logger.info("尝试使用L2度量搜索")
+                search_params["metric_type"] = "L2"
+                results = self.collection.search(
+                    data=[query_vector.tolist()],
+                    anns_field="vector",
+                    param=search_params,
+                    limit=fetch_k,
+                    output_fields=["category_id"]
+                )
+            except Exception as e2:
+                logger.error(f"L2度量搜索也失败: {e2}")
+                return []
         
         # 处理结果
         category_results = []
+        metric_type = search_params["metric_type"]
+        
         for hits in results:
             for hit in hits:
                 category_id = hit.entity.get('category_id')
                 if category_id in self.categories:
-                    # Milvus返回的是距离，需要转换为相似度
-                    distance = hit.distance
-                    # 使用指数衰减函数，与原FAISS中相同的转换方式
-                    similarity = np.exp(-distance / 10.0)
+                    # 根据metric_type计算相似度分数
+                    if metric_type == "IP":
+                        # 对于IP (余弦相似度)，分数直接就是相似度，范围是[0,1]
+                        similarity = hit.score
+                    else:
+                        # 对于L2距离，需要转换为相似度分数
+                        distance = hit.distance
+                        # 使用指数衰减函数，与原FAISS中相同的转换方式
+                        similarity = np.exp(-distance / 10.0)
                     
                     # 排除特定ID
                     if exclude_ids and category_id in exclude_ids:
@@ -353,22 +455,21 @@ class VectorStorage:
         config_path = directory / "milvus_config.json"
         logger.info(f"保存Milvus配置到: {config_path}")
         
+        # 从配置中获取连接信息
+        host = self.config.milvus_host if self.config and hasattr(self.config, "milvus_host") else "localhost"
+        port = self.config.milvus_port if self.config and hasattr(self.config, "milvus_port") else "19530"
+        
         milvus_config = {
             "collection_name": self.collection_name,
             "dimension": self.dimension,
-            "host": "localhost",
-            "port": "19530"
+            "host": host,
+            "port": port
         }
-        
-        # 如果有配置，则使用配置中的信息
-        if self.config:
-            if hasattr(self.config, "milvus_host"):
-                milvus_config["host"] = self.config.milvus_host
-            if hasattr(self.config, "milvus_port"):
-                milvus_config["port"] = self.config.milvus_port
         
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(milvus_config, f, ensure_ascii=False, indent=2)
+            
+        logger.info(f"保存Milvus配置: 主机={host}, 端口={port}, 集合={self.collection_name}")
         
         # 保存分类数据为JSON格式
         categories_path = directory / "categories.json"
@@ -462,27 +563,40 @@ class VectorStorage:
             if isinstance(categories_data, list):
                 # 数组格式 [{}, {}, ...]
                 logger.info(f"检测到数组格式的类别数据，开始处理 {len(categories_data)} 个类别")
-                for i, cat_data in enumerate(categories_data):
-                    try:
-                        if i % 100 == 0 and i > 0:
-                            logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
-                        category = Category.from_dict(cat_data)
-                        self.categories[category.id] = category
-                        categories_count += 1
-                    except Exception as e:
-                        logger.error(f"加载类别 ID={cat_data.get('id', '未知')} 时出错: {e}")
+                
+                # 使用改进的进度条
+                total = len(categories_data)
+                with tqdm(total=total, desc="加载类别", unit="类别", colour="blue", dynamic_ncols=True) as pbar:
+                    for i, cat_data in enumerate(categories_data):
+                        try:
+                            category = Category.from_dict(cat_data)
+                            self.categories[category.id] = category
+                            categories_count += 1
+                        except Exception as e:
+                            logger.error(f"加载类别 ID={cat_data.get('id', '未知')} 时出错: {e}")
+                        finally:
+                            # 更新进度条
+                            pbar.update(1)
+                            pbar.set_postfix({"完成": f"{(i+1)/total*100:.1f}%"})
             else:
                 # 字典格式 {"1": {}, "2": {}, ...}
                 logger.info(f"检测到字典格式的类别数据，开始处理 {len(categories_data)} 个类别")
-                for i, (cat_id, cat_data) in enumerate(categories_data.items()):
-                    try:
-                        if i % 100 == 0 and i > 0:
-                            logger.debug(f"已加载 {i}/{len(categories_data)} 个类别")
-                        category = Category.from_dict(cat_data)
-                        self.categories[int(cat_id)] = category
-                        categories_count += 1
-                    except Exception as e:
-                        logger.error(f"加载类别 ID={cat_id} 时出错: {e}")
+                
+                # 使用改进的进度条
+                items = list(categories_data.items())
+                total = len(items)
+                with tqdm(total=total, desc="加载类别", unit="类别", colour="blue", dynamic_ncols=True) as pbar:
+                    for i, (cat_id, cat_data) in enumerate(items):
+                        try:
+                            category = Category.from_dict(cat_data)
+                            self.categories[int(cat_id)] = category
+                            categories_count += 1
+                        except Exception as e:
+                            logger.error(f"加载类别 ID={cat_id} 时出错: {e}")
+                        finally:
+                            # 更新进度条
+                            pbar.update(1)
+                            pbar.set_postfix({"完成": f"{(i+1)/total*100:.1f}%"})
             
             process_time = time.time() - process_start_time
             logger.info(f"类别数据处理完成，耗时: {process_time:.2f}秒，成功加载 {categories_count} 个类别")
@@ -492,3 +606,88 @@ class VectorStorage:
         
         total_time = time.time() - start_time
         logger.info(f"加载完成，总耗时: {total_time:.2f}秒，加载了 {len(self.categories)} 个类别")
+
+    def batch_add_categories(self, categories: List[Category], batch_size: int = 100):
+        """批量添加分类到索引
+        
+        Args:
+            categories: 分类对象列表
+            batch_size: 每批次处理的数量
+        """
+        if not categories:
+            logger.warning("没有类别需要添加")
+            return
+            
+        # 确保集合已初始化
+        if self.collection is None:
+            self.setup_collection()
+            
+        categories_to_add = []
+        for category in categories:
+            if category.vector is None:
+                logger.warning(f"类别 ID={category.id} 没有向量，已跳过")
+                continue
+                
+            # 标准化向量以准备余弦相似度计算
+            vector = category.vector.astype('float32')
+            norm = np.linalg.norm(vector)
+            if norm > 0:
+                normalized_vector = vector / norm
+            else:
+                normalized_vector = vector
+                
+            # 检查向量维度是否正确
+            if len(normalized_vector) != self.dimension:
+                logger.warning(f"向量维度不匹配：分类 ID={category.id} 的向量维度为 {len(normalized_vector)}，但集合需要 {self.dimension}，已跳过")
+                continue
+                
+            # 添加到待插入列表
+            categories_to_add.append({
+                "category_id": int(category.id),
+                "vector": normalized_vector.tolist()
+            })
+            
+            # 保存分类对象
+            self.categories[category.id] = category
+                
+        # 按批次插入数据
+        total_count = len(categories_to_add)
+        if total_count == 0:
+            logger.warning("没有有效的类别需要添加")
+            return
+            
+        total_inserted = 0
+        for i in range(0, total_count, batch_size):
+            batch = categories_to_add[i:i+batch_size]
+            batch_count = len(batch)
+            
+            try:
+                # 批量插入到Milvus
+                logger.info(f"批量插入 {batch_count} 个类别 (批次 {i//batch_size + 1}/{(total_count-1)//batch_size + 1})")
+                insert_result = self.collection.insert(batch)
+                
+                # 验证插入是否成功
+                if hasattr(insert_result, 'insert_count') and insert_result.insert_count > 0:
+                    logger.info(f"成功插入 {insert_result.insert_count} 个类别")
+                    total_inserted += insert_result.insert_count
+                else:
+                    logger.warning(f"批量插入后没有收到确认，可能未成功")
+                    
+            except Exception as e:
+                logger.error(f"批量插入类别时出错: {e}")
+                
+        # 最后执行一次刷新，确保所有数据被保存
+        try:
+            self.collection.flush()
+            logger.info(f"成功刷新集合，确保所有 {total_inserted} 个类别的数据持久化")
+        except Exception as e:
+            logger.warning(f"刷新集合时出错: {e}")
+            
+        # 验证插入后的实体数
+        try:
+            entity_count = self.collection.num_entities
+            logger.info(f"当前集合实体数: {entity_count}")
+        except Exception as e:
+            logger.warning(f"获取集合实体数时出错: {e}")
+            
+        logger.info(f"批量添加完成，成功添加 {total_inserted}/{total_count} 个类别到Milvus集合")

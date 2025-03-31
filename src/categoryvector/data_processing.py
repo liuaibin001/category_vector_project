@@ -1,15 +1,21 @@
 """数据处理模块."""
 
 import json
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Tuple
+import os
+import sys
+from tqdm import tqdm
 
-from loguru import logger
-
-from categoryvector.config import CategoryVectorConfig
-from categoryvector.utils.logging_utils import default_logger as logger
-from .models import Category
+try:
+    from src.categoryvector.config import CategoryVectorConfig
+    from src.categoryvector.utils.logging_utils import default_logger as logger
+    from src.categoryvector.models import Category
+except ImportError:
+    from .config import CategoryVectorConfig
+    from .utils.logging_utils import default_logger as logger
+    from .models import Category
 
 
 class CategoryNode:
@@ -127,36 +133,51 @@ class CategoryProcessor:
             # 处理数据
             if isinstance(data, list):
                 # 处理数组格式
-                for category_data in data:
-                    try:
-                        # 确保必要字段存在
-                        if not all(k in category_data for k in ['id', 'path', 'levels', 'level_depth']):
-                            logger.warning(f"分类 {category_data.get('id', '未知')} 缺少必要字段，已跳过")
-                            continue
+                logger.info(f"从文件加载 {len(data)} 个分类...")
+                total = len(data)
+                with tqdm(total=total, desc="加载分类", unit="类别", colour="blue", dynamic_ncols=True) as pbar:
+                    for i, category_data in enumerate(data):
+                        try:
+                            # 确保必要字段存在
+                            if not all(k in category_data for k in ['id', 'path', 'levels', 'level_depth']):
+                                logger.warning(f"分类 {category_data.get('id', '未知')} 缺少必要字段，已跳过")
+                                continue
+                                
+                            # 创建分类对象
+                            category = Category.from_dict(category_data)
+                            self.categories[category.id] = category
                             
-                        # 创建分类对象
-                        category = Category.from_dict(category_data)
-                        self.categories[category.id] = category
-                        
-                    except Exception as e:
-                        logger.error(f"处理分类 {category_data.get('id', '未知')} 时发生错误: {e}")
-                        continue
+                        except Exception as e:
+                            logger.error(f"处理分类 {category_data.get('id', '未知')} 时发生错误: {e}")
+                            continue
+                        finally:
+                            # 更新进度条
+                            pbar.update(1)
+                            pbar.set_postfix({"完成": f"{(i+1)/total*100:.1f}%"})
             else:
                 # 处理字典格式 {"1": {}, "2": {}, ...}
-                for cat_id, cat_data in data.items():
-                    try:
-                        # 确保必要字段存在
-                        if not all(k in cat_data for k in ['id', 'path', 'levels', 'level_depth']):
-                            logger.warning(f"分类 {cat_id} 缺少必要字段，已跳过")
-                            continue
+                logger.info(f"从文件加载 {len(data)} 个分类...")
+                items = list(data.items())
+                total = len(items)
+                with tqdm(total=total, desc="加载分类", unit="类别", colour="blue", dynamic_ncols=True) as pbar:
+                    for i, (cat_id, cat_data) in enumerate(items):
+                        try:
+                            # 确保必要字段存在
+                            if not all(k in cat_data for k in ['id', 'path', 'levels', 'level_depth']):
+                                logger.warning(f"分类 {cat_id} 缺少必要字段，已跳过")
+                                continue
+                                
+                            # 创建分类对象
+                            category = Category.from_dict(cat_data)
+                            self.categories[category.id] = category
                             
-                        # 创建分类对象
-                        category = Category.from_dict(cat_data)
-                        self.categories[category.id] = category
-                        
-                    except Exception as e:
-                        logger.error(f"处理分类 {cat_id} 时发生错误: {e}")
-                        continue
+                        except Exception as e:
+                            logger.error(f"处理分类 {cat_id} 时发生错误: {e}")
+                            continue
+                        finally:
+                            # 更新进度条
+                            pbar.update(1)
+                            pbar.set_postfix({"完成": f"{(i+1)/total*100:.1f}%"})
                     
             logger.info(f"成功加载 {len(self.categories)} 个分类")
             

@@ -1,0 +1,38 @@
+# CategoryVector 配置文件
+
+[data]
+output_dir = "data/vectors"
+
+[milvus]
+host = "192.168.3.9"
+port = "19530"
+collection_name = "category_vectors"
+
+[redis]
+host = "localhost"
+port = 6379
+db = 0
+password = ""
+socket_timeout = 5
+socket_connect_timeout = 5
+decode_responses = true
+prefix = "categoryvector:"
+ttl = 86400  # 默认缓存过期时间，24小时
+
+[search]
+threshold = 0.3
+top_k = 10
+similarity_metric = "IP"  # IP表示余弦相似度，L2表示欧氏距离
+
+[index]
+type = "flat"    # 可选: flat, ivf, hnsw
+nlist = 100      # IVF索引的聚类数量
+m_factor = 16    # HNSW索引的连接数
+
+[model]
+name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+vector_dim = 384
+
+[logging]
+level = "INFO"   # DEBUG, INFO, WARNING, ERROR
+file = "logs/categoryvector.log" 

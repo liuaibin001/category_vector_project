@@ -41,4 +41,5 @@ htmlcov/
 
 # Project specific
 data/vectors/
-*.log 
+*.log
+data/single_file/**
